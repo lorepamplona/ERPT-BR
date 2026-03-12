@@ -1,0 +1,152 @@
+name: Build Patcher (Multi-Platform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. 0.8.0)'
+        required: true
+      patch_data_url:
+        description: 'URL to patch_data.zip (from GitHub Release assets)'
+        required: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: Windows
+            ext: .exe
+            icon_flag: --icon patcher.ico
+            add_data_sep: ";"
+          - os: ubuntu-22.04
+            suffix: Linux
+            ext: ""
+            icon_flag: ""
+            add_data_sep: ":"
+          - os: macos-latest
+            suffix: macOS
+            ext: ""
+            icon_flag: ""
+            add_data_sep: ":"
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          pip install pyinstaller
+          pip install -r patcher/requirements.txt
+
+      - name: Build executable
+        shell: bash
+        working-directory: patcher
+        run: |
+          pyinstaller --onefile --windowed --name "EldenRing_Dublagem_PTBR" \
+            ${{ matrix.icon_flag }} \
+            --add-data "patcher.ico${{ matrix.add_data_sep }}." \
+            --collect-all customtkinter \
+            --hidden-import pycryptodome \
+            patcher_gui.py
+
+      - name: Upload unsigned artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exe
+          path: patcher/dist/EldenRing_Dublagem_PTBR.exe
+
+      - name: Download patch_data.zip
+        shell: bash
+        run: |
+          curl -L -o patch_data.zip "${{ inputs.patch_data_url }}"
+
+      - name: Package release zip (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p package
+          cp patcher/dist/EldenRing_Dublagem_PTBR${{ matrix.ext }} package/
+          cp patch_data.zip package/
+          if [ "${{ matrix.suffix }}" = "Linux" ]; then
+            chmod +x package/EldenRing_Dublagem_PTBR
+          fi
+          cd package
+          7z a -tzip "../Patcher_v${{ inputs.version }}_${{ matrix.suffix }}.zip" .
+
+      - name: Upload artifact (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patcher_v${{ inputs.version }}_${{ matrix.suffix }}
+          path: Patcher_v${{ inputs.version }}_${{ matrix.suffix }}.zip
+
+  # SignPath code signing for Windows executable
+  # Prerequisites:
+  #   1. Apply at https://signpath.org/open-source
+  #   2. Install SignPath GitHub App on this repo
+  #   3. Add secrets: SIGNPATH_API_TOKEN
+  #   4. Replace placeholder values below with your SignPath IDs
+  sign-windows:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for SignPath GitHub Actions
+    steps:
+      - name: Sign Windows executable
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: 'REPLACE_AFTER_SIGNPATH_APPROVAL'
+          project-slug: 'ERPT-BR'
+          signing-policy-slug: 'release-signing'
+          github-artifact-id: unsigned-exe
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Download patch_data.zip
+        run: |
+          curl -L -o patch_data.zip "${{ inputs.patch_data_url }}"
+
+      - name: Package signed Windows release
+        run: |
+          mkdir -p package
+          cp signed/EldenRing_Dublagem_PTBR.exe package/
+          cp patch_data.zip package/
+          cd package
+          7z a -tzip "../Patcher_v${{ inputs.version }}_Windows.zip" .
+
+      - name: Upload signed Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patcher_v${{ inputs.version }}_Windows
+          path: Patcher_v${{ inputs.version }}_Windows.zip
+
+  upload-release:
+    needs: [build, sign-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for f in artifacts/Patcher_*/*.zip; do
+            echo "Uploading $f..."
+            gh release upload "v${{ inputs.version }}" "$f" \
+              --repo ${{ github.repository }} --clobber
+          done
