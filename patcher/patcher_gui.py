@@ -33,6 +33,13 @@ KOFI_URL = "https://ko-fi.com/yelore"
 STEAM_APP_ID = 1245620
 APP_NAME = "Elden Ring - Dublagem PT-BR"
 
+
+def _get_exe_dir() -> str:
+    """Get the directory where the actual executable lives.
+    In Nuitka --onefile, sys.executable points to a temp extraction dir,
+    so we use sys.argv[0] which always has the real path."""
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
 # ============================================================
 # Patching Engine (extracted from elden_ring_sd_tool.py)
 # ============================================================
@@ -298,26 +305,6 @@ def decrypt_aes_ecb(data: bytearray, key: bytes,
             enc_chunk = bytes(result[start:start + aligned_length])
             dec_chunk = cipher.decrypt(enc_chunk)
             result[start:start + aligned_length] = dec_chunk
-    return result
-
-
-def decrypt_aes_ecb(data: bytearray, key: bytes,
-                    ranges: list[AESRange]) -> bytearray:
-    """Decrypt AES-ECB ranges in data (inverse of encrypt_aes_ecb)."""
-    from Crypto.Cipher import AES as _AES
-    cipher = _AES.new(key, _AES.MODE_ECB)
-    result = bytearray(data)
-    for r in ranges:
-        start = r.start_offset
-        end = min(r.end_offset, len(result))
-        if start >= end:
-            continue
-        chunk = bytes(result[start:end])
-        pad_len = (16 - len(chunk) % 16) % 16
-        if pad_len:
-            chunk += bytes(pad_len)
-        dec = cipher.decrypt(chunk)
-        result[start:end] = dec[:end - start]
     return result
 
 
@@ -695,7 +682,7 @@ class PatcherApp(ctk.CTk):
         base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         icon_path = os.path.join(base, "patcher.ico")
         if not os.path.isfile(icon_path):
-            icon_path = os.path.join(os.path.dirname(sys.executable), "patcher.ico")
+            icon_path = os.path.join(_get_exe_dir(), "patcher.ico")
         if os.path.isfile(icon_path):
             try:
                 self.iconbitmap(icon_path)
@@ -1113,7 +1100,7 @@ class PatcherApp(ctk.CTk):
     def _find_movie_dirs(self) -> dict[str, str | None]:
         """Check if movie/ and movie_dlc/ folders exist next to the exe/script."""
         found = {}
-        exe_dir = os.path.dirname(sys.executable)
+        exe_dir = _get_exe_dir()
         script_dir = os.path.dirname(os.path.abspath(__file__))
         for folder_name in ("movie", "movie_dlc"):
             found[folder_name] = None
@@ -1276,8 +1263,6 @@ class PatcherApp(ctk.CTk):
                 detail = f"{success} arquivos dublados aplicados com sucesso."
                 if failed > 0:
                     detail += f"\n{failed} arquivos com erro."
-                if text_patched:
-                    detail += "\nCreditos de dublagem adicionados ao menu."
                 if movies_copied > 0:
                     detail += f"\n{movies_copied} cutscenes dubladas instaladas."
                 self.done_detail_label.configure(text=detail)
@@ -1293,7 +1278,7 @@ class PatcherApp(ctk.CTk):
     def _get_or_download_patches(self) -> Optional[str]:
         """Get patch data directory. First check local, then download."""
         local_paths = [
-            os.path.join(os.path.dirname(sys.executable), "patch_data"),
+            os.path.join(_get_exe_dir(), "patch_data"),
             os.path.join(os.path.dirname(__file__), "patch_data"),
             os.path.join(os.path.expanduser("~"), ".elden_ring_ptbr", "patch_data"),
         ]
@@ -1440,12 +1425,10 @@ class PatcherApp(ctk.CTk):
                         os.remove(original)
                         movies_restored += 1
 
-            if restored_bdt or text_restored or movies_restored > 0:
+            if restored_bdt or movies_restored > 0:
                 msg = ""
                 if restored_bdt:
                     msg += "sd.bdt original restaurado com sucesso!"
-                if text_restored:
-                    msg += "\nTexto do menu restaurado."
                 if movies_restored > 0:
                     msg += f"\n{movies_restored} cutscenes originais restauradas."
                 self.after(0, lambda: messagebox.showinfo("Sucesso", msg.strip()))
@@ -1519,10 +1502,9 @@ class PatcherApp(ctk.CTk):
 
         def _worker():
             try:
-                current_exe = sys.executable
+                current_exe = os.path.abspath(sys.argv[0])
                 # If running as python script (dev), skip self-update
-                if not getattr(sys, 'frozen', False) and not current_exe.endswith(
-                        'EldenRing_Dublagem_PTBR.exe'):
+                if not current_exe.endswith('.exe'):
                     self.after(0, lambda: messagebox.showinfo(
                         "Dev Mode",
                         "Self-update so funciona no .exe compilado."))
