@@ -27,7 +27,7 @@ from urllib.error import URLError
 # ============================================================
 # Config
 # ============================================================
-PATCHER_VERSION = "0.8.0"
+PATCHER_VERSION = "0.8.1"
 GITHUB_REPO = "lorepamplona/ERPT-BR"
 KOFI_URL = "https://ko-fi.com/yelore"
 STEAM_APP_ID = 1245620
@@ -198,24 +198,41 @@ def hash_path(path: str) -> int:
 
 
 def encrypt_aes_ecb(data: bytearray, key: bytes, ranges: list[AESRange]) -> bytearray:
+    """Encrypt specific byte ranges with AES-128-ECB.
+    Matches SoulsFormats behavior: only encrypts 16-byte aligned blocks,
+    leaving any trailing partial block untouched."""
     from Crypto.Cipher import AES as _AES
     cipher = _AES.new(key, _AES.MODE_ECB)
-    result = bytearray(data)
     for r in ranges:
-        start = r.start_offset
-        end = min(r.end_offset, len(result))
-        if start >= end:
+        if r.start_offset == -1 or r.end_offset == -1 or r.start_offset == r.end_offset:
             continue
-        chunk = bytes(result[start:end])
-        pad_len = (16 - len(chunk) % 16) % 16
-        if pad_len:
-            chunk += bytes(pad_len)
-        enc = cipher.encrypt(chunk)
-        result[start:end] = enc[:end - start]
-    return result
+        start = r.start_offset
+        end = r.end_offset
+        length = end - start
+        aligned_length = (length // 16) * 16
+        if aligned_length > 0:
+            plain_chunk = bytes(data[start:start + aligned_length])
+            encrypted_chunk = cipher.encrypt(plain_chunk)
+            data[start:start + aligned_length] = encrypted_chunk
+    return data
 
 
-def fix_wem_for_elden_ring(wem_data: bytes, slot_size: int) -> bytes:
+def fix_wem_for_elden_ring(wem_data: bytes, target_size: int) -> bytes:
+    """
+    Reformat a Wwise .wem to match Elden Ring's expected structure.
+
+    Elden Ring (Wwise v135) expects:
+      - RIFF size covering the unpadded file slot
+      - Chunks: fmt -> data (NO 'hash' chunk)
+      - data chunk extends to end of file (zero-padded)
+
+    Newer WwiseConsole (2025+) may produce an extra 'hash' chunk that must
+    be stripped.
+
+    IMPORTANT: target_size must be entry.unpadded_file_size (actual file size),
+    NOT padded_file_size (AES slot). Using padded_file_size inflates the data
+    chunk into AES padding, breaking prefetch/streaming audio (cutscenes go mute).
+    """
     if len(wem_data) < 12 or wem_data[:4] != b"RIFF" or wem_data[8:12] != b"WAVE":
         return wem_data
 
@@ -240,7 +257,8 @@ def fix_wem_for_elden_ring(wem_data: bytes, slot_size: int) -> bytes:
 
     fmt_chunk_total = 8 + len(fmt_data)
     header_size = 12 + fmt_chunk_total + 8
-    data_chunk_content_size = slot_size - header_size
+
+    data_chunk_content_size = target_size - header_size
     if data_chunk_content_size < len(audio_data):
         data_chunk_content_size = len(audio_data)
 
@@ -259,7 +277,28 @@ def fix_wem_for_elden_ring(wem_data: bytes, slot_size: int) -> bytes:
     result += audio_data
     result += b"\x00" * (data_chunk_content_size - len(audio_data))
 
-    return bytes(result[:slot_size])
+    return bytes(result[:target_size])
+
+
+def decrypt_aes_ecb(data: bytearray, key: bytes,
+                    ranges: list[AESRange]) -> bytearray:
+    """Decrypt AES-ECB ranges in data (inverse of encrypt_aes_ecb).
+    Matches SoulsFormats: only decrypts 16-byte aligned blocks."""
+    from Crypto.Cipher import AES as _AES
+    cipher = _AES.new(key, _AES.MODE_ECB)
+    result = bytearray(data)
+    for r in ranges:
+        if r.start_offset == -1 or r.end_offset == -1 or r.start_offset == r.end_offset:
+            continue
+        start = r.start_offset
+        end = r.end_offset
+        length = end - start
+        aligned_length = (length // 16) * 16
+        if aligned_length > 0:
+            enc_chunk = bytes(result[start:start + aligned_length])
+            dec_chunk = cipher.decrypt(enc_chunk)
+            result[start:start + aligned_length] = dec_chunk
+    return result
 
 
 def decrypt_aes_ecb(data: bytearray, key: bytes,
@@ -484,11 +523,12 @@ class PatchEngine:
         return len(self.entry_by_hash)
 
     def scan_replacements(self, wem_dir: str) -> dict[int, str]:
-        """Find .wem files that match BHD entries. Returns hash -> filepath."""
+        """Find .wem and .bnk files that match BHD entries. Returns hash -> filepath."""
         replacements = {}
         for root, dirs, files in os.walk(wem_dir):
             for fname in files:
-                if not fname.endswith('.wem'):
+                ext = Path(fname).suffix.lower()
+                if ext not in ('.wem', '.bnk'):
                     continue
                 full_path = os.path.join(root, fname)
                 rel_path = os.path.relpath(full_path, wem_dir).replace(os.sep, '/')
@@ -507,7 +547,7 @@ class PatchEngine:
 
                 # Try Wwise ID pattern: enus/wem/NN/ID.wem
                 stem = Path(fname).stem
-                if stem.isdigit():
+                if ext == '.wem' and stem.isdigit():
                     prefix = stem[:2]
                     wem_path = f"enus/wem/{prefix}/{stem}.wem"
                     h = hash_path(wem_path)
@@ -581,8 +621,11 @@ class PatchEngine:
                             failed += 1
                             continue
 
-                        # Fix format for Elden Ring
-                        wem_data = fix_wem_for_elden_ring(wem_data, entry.padded_file_size)
+                        # Fix format for Elden Ring (use unpadded size, not padded!)
+                        # Only apply when WEM is smaller than the original unpadded size
+                        target_size = entry.unpadded_file_size
+                        if wem_data[:4] == b"RIFF" and len(wem_data) < target_size:
+                            wem_data = fix_wem_for_elden_ring(wem_data, target_size)
 
                         # Pad to padded size
                         padded = bytearray(wem_data)
@@ -1416,7 +1459,7 @@ class PatcherApp(ctk.CTk):
         finally:
             self.after(0, lambda: self.restore_btn.configure(state="normal"))
 
-    # ── Auto-update check ──
+    # ── Auto-update ──
 
     def _check_update_silent(self):
         """Check for updates on startup. Shows banner on welcome page if available."""
@@ -1427,10 +1470,16 @@ class PatcherApp(ctk.CTk):
             latest = release.get('tag_name', '').lstrip('v')
             if not latest or latest <= PATCHER_VERSION:
                 return
-            url = release.get('html_url', '')
+
+            # Find the .exe asset in the release
+            exe_url = None
+            for asset in release.get('assets', []):
+                name = asset.get('name', '')
+                if name.endswith('.exe') and 'Dublagem' in name:
+                    exe_url = asset.get('browser_download_url')
+                    break
 
             def _show_update():
-                # Add update banner to welcome page
                 banner = ctk.CTkFrame(
                     self._pages[STEP_WELCOME],
                     fg_color="#1a2a1a", corner_radius=10,
@@ -1439,23 +1488,100 @@ class PatcherApp(ctk.CTk):
                 banner.pack(fill="x", pady=(8, 0))
                 inner = ctk.CTkFrame(banner, fg_color="transparent")
                 inner.pack(fill="x", padx=12, pady=8)
-                ctk.CTkLabel(
+                self._update_label = ctk.CTkLabel(
                     inner,
                     text=f"Nova versao disponivel: v{latest}  (atual: v{PATCHER_VERSION})",
                     font=ctk.CTkFont("Segoe UI", 12),
                     text_color=SUCCESS_GREEN, anchor="w"
-                ).pack(side="left")
-                ctk.CTkButton(
-                    inner, text="Baixar",
+                )
+                self._update_label.pack(side="left")
+                self._update_btn = ctk.CTkButton(
+                    inner, text="Atualizar",
                     font=ctk.CTkFont("Segoe UI", 11, "bold"),
                     fg_color=SUCCESS_GREEN, hover_color="#0ee090",
                     text_color="#0a0a0f", width=80, height=28,
                     corner_radius=6,
-                    command=lambda: webbrowser.open(url)
-                ).pack(side="right")
+                    command=lambda: self._do_self_update(exe_url, latest)
+                )
+                self._update_btn.pack(side="right")
             self.after(0, _show_update)
         except Exception:
             pass  # Silently ignore update check failures
+
+    def _do_self_update(self, exe_url: str, version: str):
+        """Download new exe and replace the current one via a temp batch script."""
+        if not exe_url:
+            messagebox.showerror("Erro", "URL do executavel nao encontrada no release.")
+            return
+
+        self._update_btn.configure(state="disabled", text="Baixando...")
+        self._update_label.configure(text="Baixando atualizacao...")
+
+        def _worker():
+            try:
+                current_exe = sys.executable
+                # If running as python script (dev), skip self-update
+                if not getattr(sys, 'frozen', False) and not current_exe.endswith(
+                        'EldenRing_Dublagem_PTBR.exe'):
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Dev Mode",
+                        "Self-update so funciona no .exe compilado."))
+                    self.after(0, lambda: self._update_btn.configure(
+                        state="normal", text="Atualizar"))
+                    return
+
+                # Download to temp file next to current exe
+                exe_dir = os.path.dirname(current_exe)
+                tmp_exe = os.path.join(exe_dir, f"_update_{os.getpid()}.exe")
+
+                def _progress(downloaded, total):
+                    if total > 0:
+                        pct = int(downloaded / total * 100)
+                        self.after(0, lambda p=pct: self._update_label.configure(
+                            text=f"Baixando atualizacao... {p}%"))
+
+                ok = download_file(exe_url, tmp_exe, callback=_progress)
+                if not ok or not os.path.isfile(tmp_exe):
+                    self.after(0, lambda: messagebox.showerror(
+                        "Erro", "Falha ao baixar atualizacao."))
+                    self.after(0, lambda: self._update_btn.configure(
+                        state="normal", text="Atualizar"))
+                    if os.path.isfile(tmp_exe):
+                        os.remove(tmp_exe)
+                    return
+
+                # Create a batch script that waits, replaces, relaunches, self-deletes
+                bat_path = os.path.join(exe_dir, f"_update_{os.getpid()}.bat")
+                bat_content = f'''@echo off
+ping 127.0.0.1 -n 3 > nul
+move /y "{tmp_exe}" "{current_exe}" > nul
+start "" "{current_exe}"
+del "%~f0"
+'''
+                with open(bat_path, 'w') as f:
+                    f.write(bat_content)
+
+                self.after(0, lambda: self._update_label.configure(
+                    text="Reiniciando..."))
+
+                # Launch the batch script hidden and exit
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+                subprocess.Popen(
+                    ['cmd', '/c', bat_path],
+                    startupinfo=startupinfo,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                self.after(500, lambda: os._exit(0))
+
+            except Exception as ex:
+                self.after(0, lambda: messagebox.showerror(
+                    "Erro", f"Falha na atualizacao: {ex}"))
+                self.after(0, lambda: self._update_btn.configure(
+                    state="normal", text="Atualizar"))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 
 # ============================================================
