@@ -1336,9 +1336,30 @@ class PatcherApp(ctk.CTk):
         self._log(f"Extraido para: {extract_dir}")
         return extract_dir
 
+    @staticmethod
+    def _copy_file_retry(src: str, dest: str, max_retries: int = 3,
+                         delay: float = 2.0) -> None:
+        """Copy a file with retry on WinError 32 (file in use).
+        Falls back to manual read/write if shutil.copy2 keeps failing."""
+        import time
+        for attempt in range(max_retries):
+            try:
+                shutil.copy2(src, dest)
+                return
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    continue
+                # Final attempt: manual read/write (bypasses some locks)
+                with open(src, 'rb') as f_in:
+                    data = f_in.read()
+                with open(dest, 'wb') as f_out:
+                    f_out.write(data)
+
     def _install_movies(self, game_dir: str) -> int:
         """Copy dubbed movie/movie_dlc .bk2 files to game folder with backup."""
         copied = 0
+        skipped = 0
         movies = self._find_movie_dirs()
 
         for folder_name, src in movies.items():
@@ -1361,17 +1382,25 @@ class PatcherApp(ctk.CTk):
                 dest_file = os.path.join(dest, fname)
                 backup_file = dest_file + ".original"
 
-                # Backup original if not already backed up
-                if os.path.isfile(dest_file) and not os.path.isfile(backup_file):
-                    self._log(f"  Backup: {fname} -> {fname}.original")
-                    shutil.copy2(dest_file, backup_file)
+                try:
+                    # Backup original if not already backed up
+                    if os.path.isfile(dest_file) and not os.path.isfile(backup_file):
+                        self._log(f"  Backup: {fname} -> {fname}.original")
+                        self._copy_file_retry(dest_file, backup_file)
 
-                self._log(f"  Copiando: {fname} ({os.path.getsize(src_file)/(1024*1024):.0f} MB)")
-                shutil.copy2(src_file, dest_file)
-                copied += 1
+                    self._log(f"  Copiando: {fname} ({os.path.getsize(src_file)/(1024*1024):.0f} MB)")
+                    self._copy_file_retry(src_file, dest_file)
+                    copied += 1
+                except (PermissionError, OSError) as ex:
+                    self._log(f"  AVISO: {fname} travado por outro processo, pulando. "
+                              f"Feche o Steam/jogo e tente novamente.")
+                    skipped += 1
 
         if copied > 0:
             self._log(f"{copied} cutscenes instaladas com sucesso.")
+        if skipped > 0:
+            self._log(f"{skipped} cutscenes nao puderam ser copiadas (arquivo em uso).")
+            self._log("Dica: feche o Steam completamente e tente novamente.")
         return copied
 
     def _show_install_error(self):
