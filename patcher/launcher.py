@@ -37,7 +37,7 @@ def _preload_for_nuitka():  # nunca é chamado em runtime
 
 # URL do script principal no GitHub (raw). Altere o branch se necessário.
 SCRIPT_URL = (
-    "https://raw.githubusercontent.com/lorepamplona/ERPT-BR/main/patcher_gui.py"
+    "https://raw.githubusercontent.com/lorepamplona/ERPT-BR/main/patcher/patcher_gui.py"
 )
 
 # Pasta de cache local: %LOCALAPPDATA%\EldenRingPTBR\
@@ -77,17 +77,17 @@ def _close_splash(splash: tk.Tk):
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
-def _fetch_script() -> bytes | None:
-    """Tenta baixar o script mais recente do GitHub. Retorna None se falhar."""
+def _fetch_script() -> tuple[bytes | None, str]:
+    """Tenta baixar o script mais recente do GitHub. Retorna (dados, erro)."""
     try:
         req = urllib.request.Request(
             SCRIPT_URL,
             headers={"User-Agent": "EldenRingPTBR-Launcher/1.0"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read()
-    except Exception:
-        return None
+            return resp.read(), ""
+    except Exception as e:
+        return None, str(e)
 
 
 def _fatal(msg: str):
@@ -105,7 +105,7 @@ def main():
     splash = _make_splash()
 
     # Tenta baixar versão mais recente
-    data = _fetch_script()
+    data, fetch_error = _fetch_script()
 
     if data is not None:
         # Salva no cache apenas se o conteúdo mudou (evita I/O desnecessário)
@@ -121,9 +121,10 @@ def main():
     else:
         _close_splash(splash)
         _fatal(
-            "Sem conexão com a internet.\n\n"
-            "O patcher precisa de internet na primeira execução para baixar o programa.\n"
-            "Conecte-se e tente novamente."
+            "Não foi possível baixar o patcher.\n\n"
+            f"Erro: {fetch_error}\n\n"
+            "Verifique sua conexão com a internet e tente novamente.\n"
+            f"URL: {SCRIPT_URL}"
         )
         return
 
