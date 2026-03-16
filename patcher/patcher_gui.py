@@ -76,7 +76,7 @@ def _kill_process(exe_name: str):
 # ============================================================
 # Config
 # ============================================================
-PATCHER_VERSION = "0.8.3"
+PATCHER_VERSION = "0.8.4"
 GITHUB_REPO = "lorepamplona/ERPT-BR"
 KOFI_URL = "https://ko-fi.com/yelore"
 STEAM_APP_ID = 1245620
@@ -777,8 +777,7 @@ class PatcherApp(ctk.CTk):
         self._build_done_page()
         self._show_page(STEP_WELCOME)
 
-        # Check for updates in background on startup
-        threading.Thread(target=self._check_update_silent, daemon=True).start()
+        # Update check desativado: o launcher ja baixa sempre a versao mais recente do GitHub
 
     # ── Layout ──
 
