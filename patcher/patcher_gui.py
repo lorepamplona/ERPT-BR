@@ -76,7 +76,7 @@ def _kill_process(exe_name: str):
 # ============================================================
 # Config
 # ============================================================
-PATCHER_VERSION = "0.8.2"
+PATCHER_VERSION = "0.8.3"
 GITHUB_REPO = "lorepamplona/ERPT-BR"
 KOFI_URL = "https://ko-fi.com/yelore"
 STEAM_APP_ID = 1245620
@@ -1672,8 +1672,13 @@ class PatcherApp(ctk.CTk):
                 # Create a batch script that waits, replaces, relaunches, self-deletes
                 bat_path = os.path.join(exe_dir, f"_update_{os.getpid()}.bat")
                 bat_content = f'''@echo off
-ping 127.0.0.1 -n 3 > nul
-move /y "{tmp_exe}" "{current_exe}" > nul
+timeout /t 5 /nobreak > nul
+:retry
+move /y "{tmp_exe}" "{current_exe}" > nul 2>&1
+if exist "{tmp_exe}" (
+  timeout /t 2 /nobreak > nul
+  goto retry
+)
 start "" "{current_exe}"
 del "%~f0"
 '''
