@@ -6,6 +6,7 @@ Sem DLL, sem ModEngine — funciona online.
 """
 import os
 import sys
+import stat
 import struct
 import json
 import hashlib
@@ -25,9 +26,57 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 # ============================================================
+# Admin / Process helpers
+# ============================================================
+
+# Processes that lock Elden Ring's game files
+_BLOCKING_PROCS = [
+    ("eldenring.exe",             "Elden Ring"),
+    ("easyanticheat.exe",         "Easy Anti-Cheat"),
+    ("easyanticheat_launcher.exe","Easy Anti-Cheat Launcher"),
+    ("easyanticheat_epic.exe",    "Easy Anti-Cheat (Epic)"),
+]
+
+def _is_admin() -> bool:
+    """Return True if the current process has administrator privileges."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False  # non-Windows or error → assume not admin
+
+
+def _relaunch_as_admin():
+    """Re-launch this executable with a UAC elevation prompt, then exit."""
+    import ctypes
+    exe = sys.executable
+    params = " ".join(f'"{a}"' for a in sys.argv)
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+    sys.exit(0)
+
+
+def _get_running_blocking_procs() -> list[tuple[str, str]]:
+    """Return list of (exe_name, friendly_name) for blocking processes that are running."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5
+        )
+        running_lower = result.stdout.lower()
+        return [(exe, name) for exe, name in _BLOCKING_PROCS if exe in running_lower]
+    except Exception:
+        return []
+
+
+def _kill_process(exe_name: str):
+    """Forcefully terminate a process by executable name."""
+    subprocess.run(["taskkill", "/F", "/IM", exe_name],
+                   capture_output=True, timeout=5)
+
+# ============================================================
 # Config
 # ============================================================
-PATCHER_VERSION = "0.8.1"
+PATCHER_VERSION = "0.8.2"
 GITHUB_REPO = "lorepamplona/ERPT-BR"
 KOFI_URL = "https://ko-fi.com/yelore"
 STEAM_APP_ID = 1245620
@@ -557,6 +606,19 @@ class PatchEngine:
             shutil.copy2(bdt_path, backup_path)
             self.log("Backup criado!")
             return True
+        except PermissionError:
+            self.log(
+                "Erro de permissão ao criar backup.\n"
+                "Feche o Elden Ring e execute o patcher como Administrador."
+            )
+            raise PermissionError(
+                "Sem permissão para acessar sd.bdt.\n\n"
+                "Possíveis soluções:\n"
+                "  • Feche o Elden Ring completamente antes de usar o patcher\n"
+                "  • Execute o patcher como Administrador (clique direito → Executar como administrador)\n"
+                "  • Verifique se o arquivo não está marcado como Somente Leitura\n"
+                "    (clique direito no sd.bdt → Propriedades → desmarque 'Somente leitura')"
+            )
         except Exception as ex:
             self.log(f"Erro ao criar backup: {ex}")
             return False
@@ -595,6 +657,20 @@ class PatchEngine:
 
         for bdt_path, items in by_bdt.items():
             self.log(f"Patcheando {os.path.basename(bdt_path)}...")
+            # Try to clear the read-only attribute before checking write access
+            try:
+                os.chmod(bdt_path, stat.S_IWRITE | stat.S_IREAD)
+            except Exception:
+                pass  # If we can't chmod, the access check below will catch it
+            if not os.access(bdt_path, os.W_OK):
+                raise PermissionError(
+                    f"Sem permissão para modificar {os.path.basename(bdt_path)}.\n\n"
+                    "Possíveis soluções:\n"
+                    "  • Feche o Elden Ring completamente antes de usar o patcher\n"
+                    "  • Execute o patcher como Administrador (clique direito → Executar como administrador)\n"
+                    "  • Verifique se o arquivo não está marcado como Somente Leitura\n"
+                    "    (clique direito no sd.bdt → Propriedades → desmarque 'Somente leitura')"
+                )
             with open(bdt_path, 'r+b') as bdt_f:
                 for h, wem_path in items:
                     entry, _ = self.entry_by_hash[h]
@@ -1210,6 +1286,28 @@ class PatcherApp(ctk.CTk):
 
     def _install_worker(self):
         try:
+            # ── Pre-flight: check for processes that lock game files ──
+            blocking = _get_running_blocking_procs()
+            if blocking:
+                names = "\n".join(f"  • {name}" for _, name in blocking)
+                answer = messagebox.askyesno(
+                    "Programas bloqueando o patch",
+                    f"Os seguintes programas estão abertos e podem impedir o patch:\n\n"
+                    f"{names}\n\n"
+                    "Deseja fechá-los automaticamente agora?",
+                    icon="warning"
+                )
+                if answer:
+                    for exe, name in blocking:
+                        self._log(f"Fechando {name}...")
+                        _kill_process(exe)
+                    import time; time.sleep(2)  # give OS time to release file handles
+                else:
+                    self._log(
+                        "Aviso: prosseguindo com programas abertos. "
+                        "Se o patch falhar com erro de permissão, feche o jogo e o Steam manualmente."
+                    )
+
             game_dir = self.path_var.get()
             engine = PatchEngine(game_dir, self._log)
 
@@ -1270,6 +1368,16 @@ class PatcherApp(ctk.CTk):
                 webbrowser.open(KOFI_URL)
             self.after(500, _go_done)
 
+        except PermissionError as ex:
+            msg = str(ex)
+            self._set_status("Erro de permissão — execute como Administrador")
+            self._log(f"\nERRO DE PERMISSÃO:\n{msg}")
+            self.after(0, lambda: messagebox.showerror(
+                "Sem Permissão",
+                f"{msg}\n\nDica rápida: clique com o botão direito no patcher e escolha\n"
+                "\"Executar como administrador\"."
+            ))
+            self.after(0, self._show_install_error)
         except Exception as ex:
             self._set_status(f"Erro: {ex}")
             self._log(f"\nERRO: {ex}")
@@ -1600,5 +1708,17 @@ del "%~f0"
 # ============================================================
 
 if __name__ == "__main__":
+    # Auto-elevate to admin on Windows if needed.
+    # This is safe for compiled .exe — triggers the standard UAC dialog.
+    if sys.platform == "win32" and not _is_admin():
+        answer = messagebox.askyesno(
+            "Permissão necessária",
+            "O patcher precisa de permissão de Administrador para modificar os arquivos do jogo.\n\n"
+            "Deseja reiniciar como Administrador agora?\n"
+            "(O Windows mostrará uma janela de confirmação de segurança)"
+        )
+        if answer:
+            _relaunch_as_admin()
+        # If user said no, continue anyway — they might have special permissions
     app = PatcherApp()
     app.mainloop()
