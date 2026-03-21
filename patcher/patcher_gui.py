@@ -57,21 +57,47 @@ def _relaunch_as_admin():
 
 def _get_running_blocking_procs() -> list[tuple[str, str]]:
     """Return list of (exe_name, friendly_name) for blocking processes that are running."""
+    import platform
     try:
-        result = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=5
-        )
-        running_lower = result.stdout.lower()
-        return [(exe, name) for exe, name in _BLOCKING_PROCS if exe in running_lower]
+        if platform.system() == "Windows":
+            result = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5
+            )
+            running_lower = result.stdout.lower()
+            return [(exe, name) for exe, name in _BLOCKING_PROCS if exe in running_lower]
+        else:
+            # Linux/macOS: use pgrep for each process (match .exe to find Wine/Proton)
+            my_pid = str(os.getpid())
+            found = []
+            for exe, name in _BLOCKING_PROCS:
+                result = subprocess.run(
+                    ["pgrep", "-afi", exe.replace(".", "\\.")],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    # Exclude our own process
+                    pids = [l.strip().split()[0] for l in result.stdout.strip().splitlines() if l.strip()]
+                    if any(p != my_pid for p in pids):
+                        found.append((exe, name))
+            return found
     except Exception:
         return []
 
 
 def _kill_process(exe_name: str):
-    """Forcefully terminate a process by executable name."""
-    subprocess.run(["taskkill", "/F", "/IM", exe_name],
-                   capture_output=True, timeout=5)
+    """Forcefully terminate a process by executable name (cross-platform)."""
+    import platform
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(["taskkill", "/F", "/IM", exe_name],
+                           capture_output=True, timeout=5)
+        else:
+            proc_name = exe_name.replace(".exe", "")
+            subprocess.run(["pkill", "-fi", proc_name],
+                           capture_output=True, timeout=5)
+    except Exception:
+        pass
 
 # ============================================================
 # Config
@@ -463,12 +489,21 @@ def is_game_running() -> bool:
             )
             return 'eldenring.exe' in result.stdout.lower()
         else:
-            # Linux/macOS: check via pgrep
+            # Linux/macOS: use pgrep but exclude our own PID and match only
+            # the actual game binary (eldenring.exe under Wine/Proton)
+            my_pid = str(os.getpid())
             result = subprocess.run(
-                ['pgrep', '-fi', 'eldenring'],
+                ['pgrep', '-afi', 'eldenring\\.exe'],
                 capture_output=True, text=True, timeout=5
             )
-            return result.returncode == 0
+            if result.returncode != 0:
+                return False
+            # Filter out our own process from results
+            for line in result.stdout.strip().splitlines():
+                pid = line.strip().split()[0] if line.strip() else ""
+                if pid != my_pid:
+                    return True
+            return False
     except Exception:
         return False
 
