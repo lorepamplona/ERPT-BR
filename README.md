@@ -2,6 +2,8 @@
 
 Patcher para aplicar dublagem em Portugues Brasileiro no Elden Ring (PC).
 
+**Download:** [Nexus Mods](https://www.nexusmods.com/eldenring/mods/4295)
+
 ## Funcionalidades
 
 - Aplica patch de audio diretamente nos arquivos do jogo (sem Mod Engine)
