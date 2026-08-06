@@ -480,32 +480,16 @@ def find_elden_ring_steam() -> Optional[str]:
 
 def is_game_running() -> bool:
     """Check if Elden Ring is running (cross-platform)."""
-    import platform
-    try:
-        if platform.system() == "Windows":
-            result = subprocess.run(
-                ['tasklist', '/FI', 'IMAGENAME eq eldenring.exe'],
-                capture_output=True, text=True, timeout=5
-            )
-            return 'eldenring.exe' in result.stdout.lower()
-        else:
-            # Linux/macOS: use pgrep but exclude our own PID and match only
-            # the actual game binary (eldenring.exe under Wine/Proton)
-            my_pid = str(os.getpid())
-            result = subprocess.run(
-                ['pgrep', '-afi', 'eldenring\\.exe'],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode != 0:
-                return False
-            # Filter out our own process from results
-            for line in result.stdout.strip().splitlines():
-                pid = line.strip().split()[0] if line.strip() else ""
-                if pid != my_pid:
-                    return True
-            return False
-    except Exception:
-        return False
+    import psutil
+
+    for proc in psutil.process_iter(['name']):
+        try:
+            if proc.info['name'].lower() == 'eldenring.exe':
+                return True
+        except:
+            pass
+
+    return False
 
 
 # ============================================================
