@@ -6,6 +6,7 @@ python -m nuitka ^
   --onefile ^
   --enable-plugin=tk-inter ^
   --include-package=customtkinter ^
+  --include-package=psutil ^
   --include-package-data=customtkinter ^
   --include-module=Crypto.Cipher.AES ^
   --include-module=Crypto.PublicKey.RSA ^
