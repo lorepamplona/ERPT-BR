@@ -2218,6 +2218,574 @@ class BhdShaIntegrityGuardTests(unittest.TestCase):
             self.assertEqual((written, unmatched), (1, 0))
             self.assertEqual(bdt_path.read_bytes()[4:12], replacement)
 
+    def test_scoped_mode_returns_exact_expected_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, payload, _bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+                ranges=((0, 2),),
+            )
+            (payload / "voice.bnk").write_bytes(b"XYCDEFGH")
+            plan = patcher.build_plan(payload)
+
+            assessment = engine.validate_patch_plan_sha_integrity(
+                plan,
+                mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+            )
+
+            self.assertEqual(assessment.validated_entry_count, 1)
+            self.assertEqual(len(assessment.divergent_entries), 1)
+            identity = next(iter(assessment.divergent_entries))
+            self.assertEqual(identity.archive_path, patcher.archives[0].bdt_path)
+            self.assertEqual(identity.entry_index, 0)
+            self.assertEqual(identity.file_name_hash, engine.hash_path("voice.bnk"))
+            self.assertEqual((identity.file_offset, identity.padded_file_size), (4, 8))
+
+    def test_scoped_mode_never_waives_an_invalid_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, payload, _bdt_path = self._make_patcher(
+                root,
+                live_slot=b"XYCDEFGH",
+                hashed_slot=b"ABCDEFGH",
+            )
+            (payload / "voice.bnk").write_bytes(b"12345678")
+            plan = patcher.build_plan(payload)
+
+            with self.assertRaisesRegex(
+                engine.CompatibilityError,
+                "Integridade SHA salted invalida",
+            ):
+                engine.validate_patch_plan_sha_integrity(
+                    plan,
+                    mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+                )
+
+    def test_apply_assesses_untouched_loaded_archive_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first, payload, _bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+            )
+            salt = b"GR_sound"
+            pristine = b"IJKLMNOP"
+            corrupted = b"XXKLMNOP"
+            sd_dir = first.game_dir / "sd"
+            (sd_dir / "sd_dlc02.bhd").write_bytes(
+                make_bhd_with_sha(
+                    [
+                        (
+                            engine.hash_path("untouched.bnk"),
+                            len(pristine),
+                            len(pristine),
+                            4,
+                            hashlib.sha256(pristine[:2] + salt).digest(),
+                            ((0, 2),),
+                        )
+                    ],
+                    salt,
+                )
+            )
+            (sd_dir / "sd_dlc02.bdt").write_bytes(b"HEAD" + corrupted + b"TAIL")
+            (payload / "voice.bnk").write_bytes(b"ABCDEFGH")
+            patcher = engine.PatchEngine(
+                first.game_dir,
+                backup_root=root / "backups",
+            )
+            patcher.load_archives()
+            plan = patcher.build_plan(payload)
+
+            with self.assertRaisesRegex(
+                engine.CompatibilityError,
+                "sd_dlc02.bdt.*nao corresponde ao BHD",
+            ):
+                patcher.apply_plan(
+                    plan,
+                    bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+                )
+
+            self.assertEqual(list((root / "backups").glob("*/*/manifest.json")), [])
+
+    def test_unknown_integrity_mode_fails_before_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, payload, bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+            )
+            (payload / "voice.bnk").write_bytes(b"ABCDEFGH")
+            plan = patcher.build_plan(payload)
+            before = bdt_path.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "Modo de integridade BHD"):
+                patcher.apply_plan(plan, bhd_integrity_mode="permissive")
+
+            self.assertEqual(bdt_path.read_bytes(), before)
+            self.assertEqual(list((root / "backups").glob("*/*/manifest.json")), [])
+
+    def _make_staging_fixture(
+        self,
+        root: Path,
+    ) -> tuple[
+        engine.PatchEngine,
+        engine.PatchPlan,
+        engine.BHDIntegrityAssessment,
+        Path,
+        Path,
+    ]:
+        patcher, payload, bdt_path = self._make_patcher(
+            root,
+            live_slot=b"ABCDEFGH",
+            ranges=((0, 2),),
+        )
+        replacement = b"XYCDEFGH"
+        (payload / "voice.bnk").write_bytes(replacement)
+        plan = patcher.build_plan(payload)
+        assessment = engine.validate_patch_plan_sha_integrity(
+            plan,
+            mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+        )
+        baseline_path = root / "baseline.bdt"
+        stage_path = root / "stage.bdt"
+        shutil.copyfile(bdt_path, baseline_path)
+        staged = bytearray(bdt_path.read_bytes())
+        staged[4:12] = replacement
+        stage_path.write_bytes(staged)
+        return patcher, plan, assessment, baseline_path, stage_path
+
+    def test_staging_accepts_exact_scoped_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (
+                patcher,
+                plan,
+                expected,
+                baseline_path,
+                stage_path,
+            ) = self._make_staging_fixture(root)
+            live_path = patcher.archives[0].bdt_path
+
+            actual = engine.validate_staged_patch_sha_integrity(
+                plan,
+                patcher.archives,
+                baseline_paths={live_path: baseline_path},
+                staging_paths={live_path: stage_path},
+                expected_divergent_entries=expected.divergent_entries,
+            )
+
+            self.assertEqual(actual.validated_entry_count, expected.validated_entry_count)
+            self.assertEqual(actual.divergent_entries, expected.divergent_entries)
+            self.assertEqual(
+                dict(actual.validated_archive_sha256),
+                {live_path: hashlib.sha256(stage_path.read_bytes()).hexdigest()},
+            )
+            stage_stat = stage_path.stat()
+            self.assertEqual(
+                dict(actual.validated_archive_identities),
+                {live_path: (stage_stat.st_dev, stage_stat.st_ino)},
+            )
+
+    def test_staging_accepts_restored_archive_removed_from_update_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (
+                patcher,
+                plan,
+                expected,
+                baseline_path,
+                stage_path,
+            ) = self._make_staging_fixture(root)
+            live_path = patcher.archives[0].bdt_path
+
+            removed_live = root / "removed-live.bdt"
+            removed_baseline = root / "removed-baseline.bdt"
+            removed_stage = root / "removed-stage.bdt"
+            removed_baseline.write_bytes(b"ORIGINAL")
+            # A contractive update stages the immutable baseline for an archive
+            # that the new payload no longer targets.
+            removed_stage.write_bytes(b"ORIGINAL")
+            salt = b"GR_sound"
+            removed_entry = engine.FileEntry(
+                file_name_hash=engine.hash_path("removed.bnk"),
+                padded_file_size=8,
+                unpadded_file_size=8,
+                file_offset=0,
+                sha_hash_offset=1,
+                aes_key_offset=0,
+                sha_info=engine.SHAHashInfo(
+                    hash_bytes=hashlib.sha256(b"ORIGINAL" + salt).digest(),
+                    ranges=(engine.AESRange(0, 8),),
+                ),
+            )
+            removed_archive = engine.Archive(
+                bhd_path=root / "removed-live.bhd",
+                bdt_path=removed_live,
+                bhd_sha256="0" * 64,
+                bdt_size=8,
+                bdt_mtime_ns=0,
+                entries=(removed_entry,),
+                salt=salt,
+            )
+
+            actual = engine.validate_staged_patch_sha_integrity(
+                plan,
+                (*patcher.archives, removed_archive),
+                baseline_paths={
+                    live_path: baseline_path,
+                    removed_live: removed_baseline,
+                },
+                staging_paths={
+                    live_path: stage_path,
+                    removed_live: removed_stage,
+                },
+                expected_divergent_entries=expected.divergent_entries,
+            )
+
+            self.assertEqual(actual.validated_entry_count, 2)
+            self.assertEqual(
+                actual.divergent_entries,
+                expected.divergent_entries,
+            )
+
+    def test_staging_rejects_sha_set_broader_than_expected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, plan, _expected, baseline_path, stage_path = (
+                self._make_staging_fixture(root)
+            )
+            live_path = patcher.archives[0].bdt_path
+
+            with self.assertRaisesRegex(
+                engine.CompatibilityError,
+                "conjunto SHA do staging diverge",
+            ):
+                engine.validate_staged_patch_sha_integrity(
+                    plan,
+                    patcher.archives,
+                    baseline_paths={live_path: baseline_path},
+                    staging_paths={live_path: stage_path},
+                    expected_divergent_entries=frozenset(),
+                )
+
+    def test_staging_rejects_spillover_outside_planned_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, plan, expected, baseline_path, stage_path = (
+                self._make_staging_fixture(root)
+            )
+            staged = bytearray(stage_path.read_bytes())
+            staged[-1] ^= 0xFF
+            stage_path.write_bytes(staged)
+            live_path = patcher.archives[0].bdt_path
+
+            with self.assertRaisesRegex(engine.CompatibilityError, "spillover"):
+                engine.validate_staged_patch_sha_integrity(
+                    plan,
+                    patcher.archives,
+                    baseline_paths={live_path: baseline_path},
+                    staging_paths={live_path: stage_path},
+                    expected_divergent_entries=expected.divergent_entries,
+                )
+
+    def test_staging_rejects_corrupt_baseline_even_in_scoped_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, plan, expected, baseline_path, stage_path = (
+                self._make_staging_fixture(root)
+            )
+            baseline = bytearray(baseline_path.read_bytes())
+            baseline[4] ^= 0xFF
+            baseline_path.write_bytes(baseline)
+            live_path = patcher.archives[0].bdt_path
+
+            with self.assertRaisesRegex(engine.CompatibilityError, "Baseline invalido"):
+                engine.validate_staged_patch_sha_integrity(
+                    plan,
+                    patcher.archives,
+                    baseline_paths={live_path: baseline_path},
+                    staging_paths={live_path: stage_path},
+                    expected_divergent_entries=expected.divergent_entries,
+                )
+
+    def test_staging_rejects_extra_path_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, plan, expected, baseline_path, stage_path = (
+                self._make_staging_fixture(root)
+            )
+            live_path = patcher.archives[0].bdt_path
+            unrelated = root / "unrelated.bdt"
+            unrelated.write_bytes(b"")
+
+            with self.assertRaisesRegex(engine.CompatibilityError, "Mapeamento inexato"):
+                engine.validate_staged_patch_sha_integrity(
+                    plan,
+                    patcher.archives,
+                    baseline_paths={
+                        live_path: baseline_path,
+                        unrelated: unrelated,
+                    },
+                    staging_paths={live_path: stage_path},
+                    expected_divergent_entries=expected.divergent_entries,
+                )
+
+    def test_open_staging_guard_rejects_same_size_in_place_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "stage.bdt"
+            path.write_bytes(b"01234567")
+            stream, opened = engine._open_bdt_for_integrity(
+                path,
+                expected_size=8,
+                label="O staging de teste",
+            )
+            try:
+                with path.open("r+b") as writer:
+                    writer.seek(7)
+                    writer.write(b"X")
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                # Avoid relying on filesystem timestamp resolution in this
+                # concurrency regression: force a distinct same-size mtime.
+                os.utime(
+                    path,
+                    ns=(opened.st_atime_ns, opened.st_mtime_ns + 1_000_000_000),
+                )
+
+                with self.assertRaisesRegex(
+                    engine.CompatibilityError,
+                    "mudou durante a verificacao",
+                ):
+                    engine._require_open_bdt_unchanged(
+                        path,
+                        stream,
+                        opened,
+                        expected_size=8,
+                        label="O staging de teste",
+                    )
+            finally:
+                stream.close()
+
+    def test_sha256_file_rejects_same_inode_mutation_during_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "live.bdt"
+            original = b"ABCDEFGH"
+            path.write_bytes(original)
+            initial = path.stat()
+            mutated = False
+
+            def mutate_after_first_chunk(_size: int) -> None:
+                nonlocal mutated
+                if mutated:
+                    return
+                mutated = True
+                with path.open("r+b", buffering=0) as writer:
+                    writer.seek(0)
+                    writer.write(b"Z")
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                # Restore mtime deliberately: the handle's longitudinal ctime
+                # snapshot must still expose this same-inode write.
+                os.utime(
+                    path,
+                    ns=(initial.st_atime_ns, initial.st_mtime_ns),
+                )
+
+            with mock.patch.object(engine, "COPY_BUFFER_SIZE", 4):
+                with self.assertRaisesRegex(
+                    engine.BackupError, "mudou durante o hash"
+                ):
+                    engine.sha256_file(path, callback=mutate_after_first_chunk)
+
+            self.assertTrue(mutated)
+            self.assertEqual(path.read_bytes(), b"ZBCDEFGH")
+
+    def test_owned_sha256_rejects_same_inode_mutation_during_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "stage.bdt"
+            path.write_bytes(b"ABCDEFGH")
+            identity = engine._regular_file_identity(path, label="O staging de teste")
+            initial = path.stat()
+            real_sha256 = hashlib.sha256
+            mutated = False
+
+            class MutatingDigest:
+                def __init__(self) -> None:
+                    self._digest = real_sha256()
+
+                def update(self, chunk: bytes) -> None:
+                    nonlocal mutated
+                    self._digest.update(chunk)
+                    if mutated:
+                        return
+                    mutated = True
+                    with path.open("r+b", buffering=0) as writer:
+                        writer.seek(0)
+                        writer.write(b"Z")
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                    os.utime(
+                        path,
+                        ns=(
+                            initial.st_atime_ns,
+                            initial.st_mtime_ns,
+                        ),
+                    )
+
+                def hexdigest(self) -> str:
+                    return self._digest.hexdigest()
+
+            with (
+                mock.patch.object(engine, "COPY_BUFFER_SIZE", 4),
+                mock.patch.object(
+                    engine.hashlib,
+                    "sha256",
+                    side_effect=MutatingDigest,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    engine.BackupError, "mudou durante o hash"
+                ):
+                    engine._sha256_owned_regular(path, identity)
+
+            self.assertTrue(mutated)
+            self.assertEqual(path.read_bytes(), b"ZBCDEFGH")
+
+    def test_apply_plan_requires_explicit_scoped_mode_for_sha_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, payload, bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+                ranges=((0, 2),),
+            )
+            replacement = b"XYCDEFGH"
+            (payload / "voice.bnk").write_bytes(replacement)
+
+            written, unmatched = patcher.apply_plan(
+                patcher.build_plan(payload),
+                bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+            )
+
+            self.assertEqual((written, unmatched), (1, 0))
+            self.assertEqual(bdt_path.read_bytes()[4:12], replacement)
+
+    def test_scoped_reinstall_authenticates_immutable_backup_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first, payload, bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+                ranges=((0, 2),),
+            )
+            (payload / "voice.bnk").write_bytes(b"XYCDEFGH")
+            first.apply_plan(
+                first.build_plan(payload),
+                bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+            )
+            self.assertEqual(bdt_path.read_bytes()[4:12], b"XYCDEFGH")
+
+            (payload / "voice.bnk").write_bytes(b"ZZCDEFGH")
+            update = engine.PatchEngine(
+                first.game_dir,
+                backup_root=root / "backups",
+            )
+            update.load_archives()
+            written, unmatched = update.apply_plan(
+                update.build_plan(payload),
+                bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+            )
+
+            self.assertEqual((written, unmatched), (1, 0))
+            self.assertEqual(bdt_path.read_bytes()[4:12], b"ZZCDEFGH")
+            manifest_path = next((root / "backups").glob("*/*/manifest.json"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            record = manifest["archives"][0]
+            backup_path = manifest_path.parent / record["backup"]
+            backup_bytes = backup_path.read_bytes()
+            self.assertEqual(backup_bytes[4:12], b"ABCDEFGH")
+            self.assertEqual(
+                record["sha256"],
+                hashlib.sha256(backup_bytes).hexdigest(),
+            )
+
+    def test_scoped_reinstall_never_accepts_unknown_live_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first, payload, bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+                ranges=((0, 2),),
+            )
+            (payload / "voice.bnk").write_bytes(b"XYCDEFGH")
+            first.apply_plan(
+                first.build_plan(payload),
+                bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+            )
+            tampered = bytearray(bdt_path.read_bytes())
+            tampered[-1] ^= 0x55
+            bdt_path.write_bytes(tampered)
+            before_retry = bdt_path.read_bytes()
+
+            (payload / "voice.bnk").write_bytes(b"ZZCDEFGH")
+            retry = engine.PatchEngine(
+                first.game_dir,
+                backup_root=root / "backups",
+            )
+            retry.load_archives()
+            with self.assertRaisesRegex(engine.BackupError, "alterado fora"):
+                retry.apply_plan(
+                    retry.build_plan(payload),
+                    bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+                )
+
+            self.assertEqual(bdt_path.read_bytes(), before_retry)
+
+    def test_apply_rejects_same_inode_mutation_after_exact_staging_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            patcher, payload, bdt_path = self._make_patcher(
+                root,
+                live_slot=b"ABCDEFGH",
+                ranges=((0, 2),),
+            )
+            (payload / "voice.bnk").write_bytes(b"XYCDEFGH")
+            plan = patcher.build_plan(payload)
+            original_live = bdt_path.read_bytes()
+            original_validator = engine.validate_staged_patch_sha_integrity
+
+            def mutate_after_validation(*args: object, **kwargs: object):
+                assessment = original_validator(*args, **kwargs)
+                staging_paths = kwargs["staging_paths"]
+                assert isinstance(staging_paths, dict)
+                stage_path = next(iter(staging_paths.values()))
+                assert isinstance(stage_path, Path)
+                with stage_path.open("r+b") as stream:
+                    stream.seek(-1, os.SEEK_END)
+                    last = stream.read(1)
+                    stream.seek(-1, os.SEEK_END)
+                    stream.write(bytes((last[0] ^ 0x55,)))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                return assessment
+
+            with mock.patch.object(
+                engine,
+                "validate_staged_patch_sha_integrity",
+                side_effect=mutate_after_validation,
+            ):
+                with self.assertRaisesRegex(
+                    engine.PatcherError,
+                    "mudou depois da verificacao exata",
+                ):
+                    patcher.apply_plan(
+                        plan,
+                        bhd_integrity_mode=engine.BHD_INTEGRITY_SCOPED_MOD,
+                    )
+
+            self.assertEqual(bdt_path.read_bytes(), original_live)
+
 
 if __name__ == "__main__":
     unittest.main()

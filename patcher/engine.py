@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterable, Sequence
+from typing import AbstractSet, BinaryIO, Callable, Iterable, Mapping, Sequence
 
 try:
     from .bnk import BnkMergeError, merge_bnk_with_vanilla
@@ -43,6 +43,11 @@ BDT_NAME_RE = re.compile(r"^sd(?:_dlc\d+)?\.bdt$", re.IGNORECASE)
 MIN_MATCH_RATIO = 1.0
 BACKUP_SCHEMA = 1
 COPY_BUFFER_SIZE = 8 * 1024 * 1024
+BHD_INTEGRITY_STRICT = "strict"
+BHD_INTEGRITY_SCOPED_MOD = "scoped_mod"
+BHD_INTEGRITY_MODES = frozenset(
+    {BHD_INTEGRITY_STRICT, BHD_INTEGRITY_SCOPED_MOD}
+)
 TRANSACTION_FILE_RE = re.compile(
     r"^\.erptbr-[0-9a-f]{32}-sd(?:_dlc\d+)?\.bdt\.(?:rollback|displaced)$",
     re.IGNORECASE,
@@ -281,6 +286,27 @@ class PatchPlan:
         return tuple(by_path[path] for path in sorted(by_path, key=str))
 
 
+@dataclass(frozen=True)
+class BHDEntryIdentity:
+    """Stable identity for one authenticated BHD entry within a loaded build."""
+
+    archive_path: Path
+    entry_index: int
+    file_name_hash: int
+    file_offset: int
+    padded_file_size: int
+
+
+@dataclass(frozen=True)
+class BHDIntegrityAssessment:
+    """Result of comparing a pristine BDT baseline with the planned slot bytes."""
+
+    validated_entry_count: int
+    divergent_entries: frozenset[BHDEntryIdentity]
+    validated_archive_sha256: tuple[tuple[Path, str], ...] = ()
+    validated_archive_identities: tuple[tuple[Path, tuple[int, int]], ...] = ()
+
+
 def _require_slice(data: bytes, offset: int, size: int, label: str) -> None:
     if offset < 0 or size < 0 or offset + size > len(data):
         raise CompatibilityError(
@@ -422,14 +448,54 @@ def calculate_bhd5_salted_sha256(
     return digest.digest()
 
 
-def validate_patch_plan_sha_integrity(plan: PatchPlan) -> None:
+def _validated_bhd_integrity_mode(mode: str) -> str:
+    if mode not in BHD_INTEGRITY_MODES:
+        supported = ", ".join(sorted(BHD_INTEGRITY_MODES))
+        raise ValueError(
+            f"Modo de integridade BHD desconhecido: {mode!r}. "
+            f"Modos suportados: {supported}."
+        )
+    return mode
+
+
+def _bhd_entry_identity(
+    archive: Archive,
+    entry_index: int,
+    entry: FileEntry,
+) -> BHDEntryIdentity:
+    return BHDEntryIdentity(
+        archive_path=archive.bdt_path,
+        entry_index=entry_index,
+        file_name_hash=entry.file_name_hash,
+        file_offset=entry.file_offset,
+        padded_file_size=entry.padded_file_size,
+    )
+
+
+def validate_patch_plan_sha_integrity(
+    plan: PatchPlan,
+    *,
+    archives: Sequence[Archive] | None = None,
+    mode: str = BHD_INTEGRITY_STRICT,
+    baseline_paths: Mapping[Path, Path] | None = None,
+) -> BHDIntegrityAssessment:
     """Read-only guard for BHD5 salted hashes affected by a patch plan.
 
     The hashes cover selected ranges of the encrypted bytes stored in the BDT,
     not the decrypted logical file.  Validate the complete current BDT baseline
     first, then overlay the prepared writes in memory and reject a plan that
-    would make any declared digest stale.  Nothing is written by this function.
+    would make any declared digest stale.  ``strict`` is deliberately the
+    default and rejects every planned authenticated-range divergence.  The
+    explicit ``scoped_mod`` mode records only the divergences caused by this
+    exact plan so that staging can later prove the set did not grow.  A corrupt
+    or already modified baseline is always rejected in both modes.
+
+    Nothing is written by this function.
     """
+
+    selected_mode = _validated_bhd_integrity_mode(mode)
+    validated_entry_count = 0
+    divergent_entries: set[BHDEntryIdentity] = set()
 
     writes_by_archive: dict[Path, list[PreparedWrite]] = {}
     for write in plan.writes:
@@ -440,13 +506,62 @@ def validate_patch_plan_sha_integrity(plan: PatchPlan) -> None:
             )
         writes_by_archive.setdefault(write.target.archive.bdt_path, []).append(write)
 
+    archive_by_path: dict[Path, Archive] = {}
+    selected_archives = (
+        tuple(archives)
+        if archives is not None
+        else tuple(items[0].target.archive for items in writes_by_archive.values())
+    )
+    for archive in selected_archives:
+        previous = archive_by_path.get(archive.bdt_path)
+        if previous is not None:
+            raise CompatibilityError(
+                f"Archive duplicado na verificacao SHA: {archive.bdt_path.name}."
+            )
+        archive_by_path[archive.bdt_path] = archive
     for archive_path, archive_writes in writes_by_archive.items():
-        archive = archive_writes[0].target.archive
-        if any(item.target.archive != archive for item in archive_writes[1:]):
+        archive = archive_by_path.get(archive_path)
+        if archive is None:
+            raise CompatibilityError(
+                f"O plano referencia archive nao coberto pela verificacao: "
+                f"{archive_path.name}."
+            )
+        if any(item.target.archive != archive for item in archive_writes):
             raise CompatibilityError(
                 f"O plano possui metadados divergentes para {archive_path.name}. "
                 "Nenhum arquivo foi alterado."
             )
+
+    archive_paths = set(archive_by_path)
+    if baseline_paths is not None:
+        missing = archive_paths.difference(baseline_paths)
+        extra = set(baseline_paths).difference(archive_paths)
+        if missing or extra:
+            raise CompatibilityError(
+                "Mapeamento inexato de baselines para a verificacao SHA "
+                f"(ausentes={sorted(path.name for path in missing)}, "
+                f"extras={sorted(path.name for path in extra)})."
+            )
+        selected_paths = tuple(baseline_paths[path] for path in archive_by_path)
+        if len(set(selected_paths)) != len(selected_paths):
+            raise CompatibilityError(
+                "Dois archives apontam para o mesmo baseline na verificacao SHA."
+            )
+        if any(
+            baseline_paths[archive_path] == archive_path
+            for archive_path in archive_by_path
+        ):
+            raise CompatibilityError(
+                "O baseline imutavel nao pode ser o BDT ativo na verificacao SHA."
+            )
+
+    for archive_path, archive in archive_by_path.items():
+        archive_writes = writes_by_archive.get(archive_path, ())
+        read_path = (
+            archive_path
+            if baseline_paths is None
+            else baseline_paths[archive_path]
+        )
 
         intervals = sorted(
             (
@@ -471,50 +586,26 @@ def validate_patch_plan_sha_integrity(plan: PatchPlan) -> None:
         write_starts = [item[0] for item in intervals]
         write_ends = [item[1] for item in intervals]
 
+        stream, opened = _open_bdt_for_integrity(
+            read_path,
+            expected_size=archive.bdt_size,
+            label=f"O baseline de {archive_path.name}",
+        )
         try:
-            before = archive_path.lstat()
-        except OSError as exc:
-            raise CompatibilityError(
-                f"Nao foi possivel verificar {archive_path.name}: {exc}. "
-                "Nenhum arquivo foi alterado."
-            ) from exc
-        if (
-            _metadata_is_link_or_reparse(before)
-            or not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_size != archive.bdt_size
-            or before.st_mtime_ns != archive.bdt_mtime_ns
-        ):
-            raise CompatibilityError(
-                f"{archive_path.name} mudou ou nao e um arquivo regular exclusivo; "
-                "tente novamente. Nenhum arquivo foi alterado."
-            )
-
-        try:
-            stream = archive_path.open("rb")
-        except OSError as exc:
-            raise CompatibilityError(
-                f"Nao foi possivel ler {archive_path.name}: {exc}. "
-                "Nenhum arquivo foi alterado."
-            ) from exc
-        try:
-            opened = os.fstat(stream.fileno())
             if (
-                not stat.S_ISREG(opened.st_mode)
-                or opened.st_nlink != 1
-                or opened.st_size != archive.bdt_size
-                or opened.st_mtime_ns != archive.bdt_mtime_ns
-                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                baseline_paths is None
+                and opened.st_mtime_ns != archive.bdt_mtime_ns
             ):
                 raise CompatibilityError(
-                    f"{archive_path.name} mudou durante a abertura; tente novamente. "
+                    f"{archive_path.name} mudou depois do planejamento; tente novamente. "
                     "Nenhum arquivo foi alterado."
                 )
 
-            for entry in archive.entries:
+            for entry_index, entry in enumerate(archive.entries):
                 sha_info = entry.sha_info
                 if sha_info is None:
                     continue
+                validated_entry_count += 1
                 if len(sha_info.hash_bytes) != hashlib.sha256().digest_size:
                     raise CompatibilityError(
                         f"Metadado SHA invalido em {archive_path.name}, entrada "
@@ -613,32 +704,438 @@ def validate_patch_plan_sha_integrity(plan: PatchPlan) -> None:
                         f"0x{entry.file_name_hash:016x}: o BDT atual nao corresponde ao "
                         "BHD. Nenhum arquivo foi alterado."
                     )
-                if changed_by is not None and planned_digest.digest() != sha_info.hash_bytes:
-                    raise CompatibilityError(
-                        f"O patch alteraria um range SHA autenticado em "
-                        f"{archive_path.name}, entrada 0x{entry.file_name_hash:016x} "
-                        f"({changed_by}). A instalacao direta nao e segura para este "
-                        "build. Nenhum arquivo foi alterado."
-                    )
+                if planned_digest.digest() != sha_info.hash_bytes:
+                    if changed_by is None:
+                        raise CompatibilityError(
+                            f"A simulacao SHA divergiu sem uma gravacao correspondente em "
+                            f"{archive_path.name}, entrada 0x{entry.file_name_hash:016x}. "
+                            "Nenhum arquivo foi alterado."
+                        )
+                    identity = _bhd_entry_identity(archive, entry_index, entry)
+                    divergent_entries.add(identity)
+                    if selected_mode == BHD_INTEGRITY_STRICT:
+                        raise CompatibilityError(
+                            f"O patch alteraria um range SHA autenticado em "
+                            f"{archive_path.name}, entrada 0x{entry.file_name_hash:016x} "
+                            f"({changed_by}). A instalacao direta nao e segura para este "
+                            "build. Nenhum arquivo foi alterado."
+                        )
 
-            opened_after = os.fstat(stream.fileno())
-            current = archive_path.lstat()
-            if (
-                _metadata_is_link_or_reparse(current)
-                or not stat.S_ISREG(current.st_mode)
-                or current.st_nlink != 1
-                or opened_after.st_size != archive.bdt_size
-                or opened_after.st_mtime_ns != archive.bdt_mtime_ns
-                or (opened_after.st_dev, opened_after.st_ino)
-                != (opened.st_dev, opened.st_ino)
-                or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
-            ):
-                raise CompatibilityError(
-                    f"{archive_path.name} mudou durante a verificacao; tente novamente. "
-                    "Nenhum arquivo foi alterado."
-                )
+            _require_open_bdt_unchanged(
+                read_path,
+                stream,
+                opened,
+                expected_size=archive.bdt_size,
+                label=f"O baseline de {archive_path.name}",
+            )
         finally:
             stream.close()
+
+    return BHDIntegrityAssessment(
+        validated_entry_count=validated_entry_count,
+        divergent_entries=frozenset(divergent_entries),
+    )
+
+
+def _open_bdt_for_integrity(
+    path: Path,
+    *,
+    expected_size: int,
+    label: str,
+) -> tuple[BinaryIO, os.stat_result]:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise CompatibilityError(f"Nao foi possivel abrir {label}: {exc}.") from exc
+    if (
+        _metadata_is_link_or_reparse(before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size != expected_size
+    ):
+        raise CompatibilityError(
+            f"{label} nao e um arquivo regular exclusivo com o tamanho esperado."
+        )
+    try:
+        stream = path.open("rb")
+    except OSError as exc:
+        raise CompatibilityError(f"Nao foi possivel ler {label}: {exc}.") from exc
+    opened = os.fstat(stream.fileno())
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_size != expected_size
+        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        or opened.st_mtime_ns != before.st_mtime_ns
+        # Windows may expose different ctime semantics for path and handle
+        # snapshots.  POSIX ctime is comparable across both views.
+        or (
+            os.name != "nt"
+            and getattr(opened, "st_ctime_ns", None)
+            != getattr(before, "st_ctime_ns", None)
+        )
+    ):
+        stream.close()
+        raise CompatibilityError(f"{label} mudou durante a abertura.")
+    return stream, opened
+
+
+def _require_open_bdt_unchanged(
+    path: Path,
+    stream: BinaryIO,
+    opened: os.stat_result,
+    *,
+    expected_size: int,
+    label: str,
+) -> None:
+    opened_after = os.fstat(stream.fileno())
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise CompatibilityError(f"{label} desapareceu durante a verificacao: {exc}.") from exc
+    if (
+        _metadata_is_link_or_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or current.st_size != expected_size
+        or opened_after.st_size != expected_size
+        or opened_after.st_mtime_ns != opened.st_mtime_ns
+        or current.st_mtime_ns != opened.st_mtime_ns
+        or getattr(opened_after, "st_ctime_ns", None)
+        != getattr(opened, "st_ctime_ns", None)
+        or (
+            os.name != "nt"
+            and getattr(current, "st_ctime_ns", None)
+            != getattr(opened, "st_ctime_ns", None)
+        )
+        or (opened_after.st_dev, opened_after.st_ino)
+        != (opened.st_dev, opened.st_ino)
+        or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        raise CompatibilityError(f"{label} mudou durante a verificacao.")
+
+
+def _streamed_bhd_entry_sha256(
+    stream: BinaryIO,
+    archive: Archive,
+    entry: FileEntry,
+) -> bytes:
+    sha_info = entry.sha_info
+    if sha_info is None:
+        raise ValueError("A entrada nao possui metadado SHA.")
+    if len(sha_info.hash_bytes) != hashlib.sha256().digest_size:
+        raise CompatibilityError(
+            f"Metadado SHA invalido em {archive.bdt_path.name}, entrada "
+            f"0x{entry.file_name_hash:016x}."
+        )
+    digest = hashlib.sha256()
+    for range_index, item in enumerate(sha_info.ranges):
+        if item.start_offset == -1 or item.end_offset == -1:
+            continue
+        if (
+            item.start_offset < 0
+            or item.end_offset < item.start_offset
+            or item.end_offset > entry.padded_file_size
+        ):
+            raise CompatibilityError(
+                f"Range SHA[{range_index}] invalido em {archive.bdt_path.name}, "
+                f"entrada 0x{entry.file_name_hash:016x}."
+            )
+        absolute = entry.file_offset + item.start_offset
+        remaining = item.end_offset - item.start_offset
+        stream.seek(absolute)
+        while remaining:
+            chunk = stream.read(min(COPY_BUFFER_SIZE, remaining))
+            if not chunk:
+                raise CompatibilityError(
+                    f"Leitura incompleta de {archive.bdt_path.name}, entrada "
+                    f"0x{entry.file_name_hash:016x}."
+                )
+            digest.update(chunk)
+            remaining -= len(chunk)
+    digest.update(archive.salt)
+    return digest.digest()
+
+
+def _require_equal_stream_range(
+    expected_stream: BinaryIO,
+    actual_stream: BinaryIO,
+    *,
+    start: int,
+    end: int,
+    archive_name: str,
+    actual_bytes: Callable[[bytes], object] | None = None,
+) -> None:
+    if start >= end:
+        return
+    expected_stream.seek(start)
+    actual_stream.seek(start)
+    cursor = start
+    while cursor < end:
+        length = min(COPY_BUFFER_SIZE, end - cursor)
+        expected = expected_stream.read(length)
+        actual = actual_stream.read(length)
+        if len(expected) != length or len(actual) != length:
+            raise CompatibilityError(
+                f"Leitura incompleta durante a verificacao do staging de {archive_name}."
+            )
+        if actual != expected:
+            mismatch = next(
+                index
+                for index, (left, right) in enumerate(zip(expected, actual, strict=True))
+                if left != right
+            )
+            raise CompatibilityError(
+                f"O staging de {archive_name} possui alteracao fora dos slots "
+                f"planejados (spillover no offset {cursor + mismatch})."
+            )
+        if actual_bytes is not None:
+            actual_bytes(actual)
+        cursor += length
+
+
+def validate_staged_patch_sha_integrity(
+    plan: PatchPlan,
+    archives: Sequence[Archive],
+    *,
+    baseline_paths: Mapping[Path, Path],
+    staging_paths: Mapping[Path, Path],
+    expected_divergent_entries: AbstractSet[BHDEntryIdentity],
+    staging_identities: Mapping[Path, tuple[int, int]] | None = None,
+) -> BHDIntegrityAssessment:
+    """Prove that staging is exactly baseline plus this plan, with no spillover.
+
+    The pristine backup is authenticated again and therefore cannot be waived by
+    ``scoped_mod``.  The resulting staged BHD divergences must equal, not merely
+    contain, the set produced by :func:`validate_patch_plan_sha_integrity`.
+    """
+
+    expected_divergences = frozenset(expected_divergent_entries)
+    if any(not isinstance(item, BHDEntryIdentity) for item in expected_divergences):
+        raise TypeError("expected_divergent_entries deve conter BHDEntryIdentity.")
+
+    archive_by_path: dict[Path, Archive] = {}
+    for archive in archives:
+        if archive.bdt_path in archive_by_path:
+            raise CompatibilityError(
+                f"Archive duplicado na verificacao de staging: {archive.bdt_path.name}."
+            )
+        archive_by_path[archive.bdt_path] = archive
+
+    writes_by_archive: dict[Path, list[PreparedWrite]] = {
+        path: [] for path in archive_by_path
+    }
+    for write in plan.writes:
+        live_path = write.target.archive.bdt_path
+        archive = archive_by_path.get(live_path)
+        if archive is None or archive != write.target.archive:
+            raise CompatibilityError(
+                f"O staging nao cobre os metadados planejados de {live_path.name}."
+            )
+        writes_by_archive[live_path].append(write)
+
+    expected_paths = set(archive_by_path)
+    missing_baselines = expected_paths.difference(baseline_paths)
+    missing_staging = expected_paths.difference(staging_paths)
+    extra_baselines = set(baseline_paths).difference(expected_paths)
+    extra_staging = set(staging_paths).difference(expected_paths)
+    missing_identities = (
+        expected_paths.difference(staging_identities)
+        if staging_identities is not None
+        else set()
+    )
+    extra_identities = (
+        set(staging_identities).difference(expected_paths)
+        if staging_identities is not None
+        else set()
+    )
+    if (
+        missing_baselines
+        or missing_staging
+        or extra_baselines
+        or extra_staging
+        or missing_identities
+        or extra_identities
+    ):
+        missing = sorted(
+            path.name
+            for path in missing_baselines.union(missing_staging, missing_identities)
+        )
+        extra = sorted(
+            path.name
+            for path in extra_baselines.union(extra_staging, extra_identities)
+        )
+        raise CompatibilityError(
+            "Mapeamento inexato para verificar o staging "
+            f"(ausentes={missing}, extras={extra})."
+        )
+
+    validated_entry_count = 0
+    actual_divergences: set[BHDEntryIdentity] = set()
+    known_identities: set[BHDEntryIdentity] = set()
+    validated_archive_sha256: dict[Path, str] = {}
+    validated_archive_identities: dict[Path, tuple[int, int]] = {}
+
+    for live_path, archive in archive_by_path.items():
+        baseline_path = baseline_paths[live_path]
+        stage_path = staging_paths[live_path]
+        if baseline_path == stage_path:
+            raise CompatibilityError(
+                f"Baseline e staging de {live_path.name} apontam para o mesmo caminho."
+            )
+        baseline_stream, baseline_opened = _open_bdt_for_integrity(
+            baseline_path,
+            expected_size=archive.bdt_size,
+            label=f"O baseline de {live_path.name}",
+        )
+        try:
+            stage_stream, stage_opened = _open_bdt_for_integrity(
+                stage_path,
+                expected_size=archive.bdt_size,
+                label=f"O staging de {live_path.name}",
+            )
+        except Exception:
+            baseline_stream.close()
+            raise
+        try:
+            if (baseline_opened.st_dev, baseline_opened.st_ino) == (
+                stage_opened.st_dev,
+                stage_opened.st_ino,
+            ):
+                raise CompatibilityError(
+                    f"Baseline e staging de {live_path.name} sao o mesmo arquivo."
+                )
+            if staging_identities is not None:
+                expected_identity = staging_identities.get(live_path)
+                if expected_identity is None or expected_identity != (
+                    stage_opened.st_dev,
+                    stage_opened.st_ino,
+                ):
+                    raise CompatibilityError(
+                        f"O staging de {live_path.name} foi trocado antes da verificacao."
+                    )
+
+            ordered_writes = sorted(
+                writes_by_archive.get(live_path, ()),
+                key=lambda item: item.target.entry.file_offset,
+            )
+            stage_digest = hashlib.sha256()
+            cursor = 0
+            for write in ordered_writes:
+                entry = write.target.entry
+                start = entry.file_offset
+                end = start + entry.padded_file_size
+                if start < cursor or end > archive.bdt_size:
+                    raise CompatibilityError(
+                        f"Slots sobrepostos ou fora do arquivo em {live_path.name}."
+                    )
+                _require_equal_stream_range(
+                    baseline_stream,
+                    stage_stream,
+                    start=cursor,
+                    end=start,
+                    archive_name=live_path.name,
+                    actual_bytes=stage_digest.update,
+                )
+                source_data = write.replacement.source_path.read_bytes()
+                if hashlib.sha256(source_data).hexdigest() != write.source_sha256:
+                    raise PatcherError(
+                        "O payload mudou antes da verificacao do staging: "
+                        f"{write.replacement.source_relative}."
+                    )
+                expected_slot = prepare_slot(
+                    source_data,
+                    write.replacement.source_path.suffix,
+                    entry,
+                )
+                stage_stream.seek(start)
+                actual_slot = stage_stream.read(len(expected_slot))
+                if actual_slot != expected_slot:
+                    raise CompatibilityError(
+                        f"O staging de {live_path.name} diverge no slot planejado "
+                        f"{write.replacement.source_relative}."
+                    )
+                stage_digest.update(actual_slot)
+                cursor = end
+            _require_equal_stream_range(
+                baseline_stream,
+                stage_stream,
+                start=cursor,
+                end=archive.bdt_size,
+                archive_name=live_path.name,
+                actual_bytes=stage_digest.update,
+            )
+
+            for entry_index, entry in enumerate(archive.entries):
+                if entry.sha_info is None:
+                    continue
+                validated_entry_count += 1
+                identity = _bhd_entry_identity(archive, entry_index, entry)
+                known_identities.add(identity)
+                baseline_digest = _streamed_bhd_entry_sha256(
+                    baseline_stream, archive, entry
+                )
+                if baseline_digest != entry.sha_info.hash_bytes:
+                    raise CompatibilityError(
+                        f"Baseline invalido em {live_path.name}, entrada "
+                        f"0x{entry.file_name_hash:016x}: o backup nao corresponde ao BHD."
+                    )
+                stage_entry_digest = _streamed_bhd_entry_sha256(
+                    stage_stream, archive, entry
+                )
+                if stage_entry_digest != entry.sha_info.hash_bytes:
+                    actual_divergences.add(identity)
+
+            _require_open_bdt_unchanged(
+                baseline_path,
+                baseline_stream,
+                baseline_opened,
+                expected_size=archive.bdt_size,
+                label=f"O baseline de {live_path.name}",
+            )
+            _require_open_bdt_unchanged(
+                stage_path,
+                stage_stream,
+                stage_opened,
+                expected_size=archive.bdt_size,
+                label=f"O staging de {live_path.name}",
+            )
+            validated_archive_sha256[live_path] = stage_digest.hexdigest()
+            validated_archive_identities[live_path] = (
+                stage_opened.st_dev,
+                stage_opened.st_ino,
+            )
+        finally:
+            baseline_stream.close()
+            stage_stream.close()
+
+    unknown_expected = expected_divergences.difference(known_identities)
+    if unknown_expected:
+        raise CompatibilityError(
+            "O conjunto esperado de divergencias SHA referencia entradas fora do staging."
+        )
+    actual = frozenset(actual_divergences)
+    if actual != expected_divergences:
+        unexpected = actual.difference(expected_divergences)
+        missing = expected_divergences.difference(actual)
+        raise CompatibilityError(
+            "O conjunto SHA do staging diverge do plano "
+            f"(inesperadas={len(unexpected)}, ausentes={len(missing)}); "
+            "possivel spillover."
+        )
+    return BHDIntegrityAssessment(
+        validated_entry_count=validated_entry_count,
+        divergent_entries=actual,
+        validated_archive_sha256=tuple(
+            sorted(validated_archive_sha256.items(), key=lambda item: str(item[0]))
+        ),
+        validated_archive_identities=tuple(
+            sorted(
+                validated_archive_identities.items(),
+                key=lambda item: str(item[0]),
+            )
+        ),
+    )
 
 
 def parse_bhd5(data: bytes, bdt_size: int | None = None) -> tuple[FileEntry, ...]:
@@ -892,6 +1389,8 @@ def prepare_bnk_slot_from_baseline(
     source_data: bytes,
     encrypted_baseline_slot: bytes,
     entry: FileEntry,
+    *,
+    external_wem_ids: AbstractSet[int],
 ) -> bytes:
     """Merge a payload BNK into the decrypted vanilla staging-slot baseline."""
 
@@ -905,10 +1404,90 @@ def prepare_bnk_slot_from_baseline(
         decrypt_aes_ecb(baseline, entry.aes_info.key, entry.aes_info.ranges)
     vanilla = bytes(baseline[: entry.unpadded_file_size])
     try:
-        merged = merge_bnk_with_vanilla(vanilla, source_data)
+        merged = merge_bnk_with_vanilla(
+            vanilla,
+            source_data,
+            external_wem_ids=external_wem_ids,
+        )
     except BnkMergeError as exc:
         raise CompatibilityError(f"BNK nao pode ser mesclado com o vanilla: {exc}") from exc
     return prepare_slot(merged, ".bnk", entry)
+
+
+def _optional_stat_field_unchanged(
+    before: os.stat_result,
+    after: os.stat_result,
+    field: str,
+) -> bool:
+    """Compare one timestamp when both filesystem snapshots expose it."""
+
+    before_value = getattr(before, field, None)
+    after_value = getattr(after, field, None)
+    return (
+        before_value is None
+        or after_value is None
+        or before_value == after_value
+    )
+
+
+def _regular_hash_open_snapshot_is_valid(
+    before: os.stat_result,
+    opened: os.stat_result,
+) -> bool:
+    """Bind a newly opened hash stream to the exact path snapshot inspected."""
+
+    return (
+        stat.S_ISREG(opened.st_mode)
+        and opened.st_nlink == 1
+        and (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+        and opened.st_size == before.st_size
+        and opened.st_mtime_ns == before.st_mtime_ns
+        # Windows can expose different ctime semantics through path and handle
+        # snapshots. Compare each view longitudinally below; POSIX can also bind
+        # the two initial views directly.
+        and (
+            os.name == "nt"
+            or _optional_stat_field_unchanged(before, opened, "st_ctime_ns")
+        )
+    )
+
+
+def _regular_hash_final_snapshot_is_valid(
+    before: os.stat_result,
+    opened: os.stat_result,
+    opened_after: os.stat_result,
+    current: os.stat_result,
+    *,
+    bytes_read: int,
+) -> bool:
+    """Prove a hash consumed one unchanged regular file through exact EOF."""
+
+    identity = (before.st_dev, before.st_ino)
+    expected_size = before.st_size
+    return (
+        stat.S_ISREG(opened_after.st_mode)
+        and stat.S_ISREG(current.st_mode)
+        and not _metadata_is_link_or_reparse(current)
+        and opened_after.st_nlink == 1
+        and current.st_nlink == 1
+        and (opened_after.st_dev, opened_after.st_ino) == identity
+        and (current.st_dev, current.st_ino) == identity
+        and opened_after.st_size == expected_size
+        and current.st_size == expected_size
+        and bytes_read == expected_size
+        and opened_after.st_mtime_ns == opened.st_mtime_ns
+        and current.st_mtime_ns == before.st_mtime_ns
+        and _optional_stat_field_unchanged(opened, opened_after, "st_ctime_ns")
+        and _optional_stat_field_unchanged(before, current, "st_ctime_ns")
+        and (
+            os.name == "nt"
+            or _optional_stat_field_unchanged(
+                opened_after,
+                current,
+                "st_ctime_ns",
+            )
+        )
+    )
 
 
 def sha256_file(path: Path, callback: Callable[[int], None] | None = None) -> str:
@@ -923,28 +1502,35 @@ def sha256_file(path: Path, callback: Callable[[int], None] | None = None) -> st
     ):
         raise BackupError(f"Arquivo inseguro (link/reparse/hardlink/tipo): '{path}'.")
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    bytes_read = 0
+    try:
+        stream = path.open("rb")
+    except OSError as exc:
+        raise BackupError(f"Nao foi possivel abrir '{path}' para hash: {exc}") from exc
+    try:
         opened = os.fstat(stream.fileno())
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        if not _regular_hash_open_snapshot_is_valid(before, opened):
             raise BackupError(f"Arquivo trocado durante a abertura: '{path}'.")
         while chunk := stream.read(COPY_BUFFER_SIZE):
             digest.update(chunk)
+            bytes_read += len(chunk)
             if callback:
                 callback(len(chunk))
         opened_after = os.fstat(stream.fileno())
-    try:
-        current = path.lstat()
-    except OSError as exc:
-        raise BackupError(f"Arquivo mudou durante o hash: '{path}': {exc}") from exc
-    if (
-        _metadata_is_link_or_reparse(current)
-        or not stat.S_ISREG(current.st_mode)
-        or opened_after.st_nlink != 1
-        or current.st_nlink != 1
-        or (opened_after.st_dev, opened_after.st_ino) != (before.st_dev, before.st_ino)
-        or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
-    ):
-        raise BackupError(f"Arquivo mudou durante o hash: '{path}'.")
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise BackupError(f"Arquivo mudou durante o hash: '{path}': {exc}") from exc
+        if not _regular_hash_final_snapshot_is_valid(
+            before,
+            opened,
+            opened_after,
+            current,
+            bytes_read=bytes_read,
+        ):
+            raise BackupError(f"Arquivo mudou durante o hash: '{path}'.")
+    finally:
+        stream.close()
     return digest.hexdigest()
 
 
@@ -1030,7 +1616,12 @@ def _sha256_owned_regular(path: Path, expected_identity: tuple[int, int]) -> str
     before = _regular_file_identity(path, label="O arquivo temporario")
     if before != expected_identity:
         raise BackupError(f"O arquivo temporario foi trocado: '{path}'.")
+    try:
+        before_metadata = path.lstat()
+    except OSError as exc:
+        raise BackupError(f"O arquivo temporario mudou: '{path}': {exc}") from exc
     digest = hashlib.sha256()
+    bytes_read = 0
     try:
         stream = path.open("rb")
     except OSError as exc:
@@ -1039,19 +1630,27 @@ def _sha256_owned_regular(path: Path, expected_identity: tuple[int, int]) -> str
         ) from exc
     try:
         opened = os.fstat(stream.fileno())
-        if (opened.st_dev, opened.st_ino) != expected_identity:
+        if (
+            (before_metadata.st_dev, before_metadata.st_ino) != expected_identity
+            or not _regular_hash_open_snapshot_is_valid(before_metadata, opened)
+        ):
             raise BackupError(f"O arquivo temporario foi trocado: '{path}'.")
         while chunk := stream.read(COPY_BUFFER_SIZE):
             digest.update(chunk)
+            bytes_read += len(chunk)
         opened_after = os.fstat(stream.fileno())
-        current = path.lstat()
-        if (
-            _metadata_is_link_or_reparse(current)
-            or not stat.S_ISREG(current.st_mode)
-            or opened_after.st_nlink != 1
-            or current.st_nlink != 1
-            or (opened_after.st_dev, opened_after.st_ino) != expected_identity
-            or (current.st_dev, current.st_ino) != expected_identity
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise BackupError(
+                f"O arquivo temporario mudou durante o hash: '{path}': {exc}"
+            ) from exc
+        if not _regular_hash_final_snapshot_is_valid(
+            before_metadata,
+            opened,
+            opened_after,
+            current,
+            bytes_read=bytes_read,
         ):
             raise BackupError(f"O arquivo temporario mudou durante o hash: '{path}'.")
         return digest.hexdigest()
@@ -2346,7 +2945,10 @@ class BackupManager:
         _atomic_json(self.manifest_path, cleaned)
         return cleaned
 
-    def prepare(self) -> tuple[dict, bool, dict[Path, str]]:
+    def prepare(
+        self,
+        new_baseline_guard: Callable[[], object] | None = None,
+    ) -> tuple[dict, bool, dict[Path, str]]:
         legacy = self._legacy_backups()
         if legacy:
             names = ", ".join(path.name for path in legacy)
@@ -2415,6 +3017,13 @@ class BackupManager:
                     f"{archive.bdt_path.name} mudou durante a autenticacao inicial."
                 )
             baseline_hashes[archive.bdt_path] = digest
+
+        # Fix the full-file hashes first, then authenticate the exact live BHD
+        # ranges before any backup directory is created.  The copies below must
+        # still match these already-fixed hashes, closing the gap between the
+        # salted guard and publication of a new immutable baseline.
+        if new_baseline_guard is not None:
+            new_baseline_guard()
 
         parent = self.directory.parent
         parent.mkdir(parents=True, exist_ok=True)
@@ -3100,6 +3709,8 @@ class PatchEngine:
         self,
         plan: PatchPlan,
         progress: Callable[[int, int], None] | None = None,
+        *,
+        bhd_integrity_mode: str = BHD_INTEGRITY_STRICT,
     ) -> tuple[int, int]:
         if not plan.writes:
             raise CompatibilityError("O plano de patch esta vazio.")
@@ -3108,7 +3719,12 @@ class PatchEngine:
         # can therefore never mistake already dubbed bytes for game originals.
         manager = self._backup_manager(self.archives)
         with manager.operation_lock():
-            return self._apply_plan_locked(plan, manager, progress)
+            return self._apply_plan_locked(
+                plan,
+                manager,
+                progress,
+                bhd_integrity_mode=bhd_integrity_mode,
+            )
 
     def _validate_plan_snapshot(self, archives: Sequence[Archive]) -> None:
         for archive in archives:
@@ -3130,11 +3746,42 @@ class PatchEngine:
         plan: PatchPlan,
         manager: BackupManager,
         progress: Callable[[int, int], None] | None,
+        *,
+        bhd_integrity_mode: str = BHD_INTEGRITY_STRICT,
     ) -> tuple[int, int]:
-        self._validate_plan_snapshot(plan.touched_archives)
-        validate_patch_plan_sha_integrity(plan)
-        manifest, _created, pre_hashes = manager.prepare()
+        self._validate_plan_snapshot(self.archives)
+        selected_integrity_mode = _validated_bhd_integrity_mode(bhd_integrity_mode)
+        new_baseline_assessment: BHDIntegrityAssessment | None = None
+
+        def authenticate_new_baseline() -> None:
+            nonlocal new_baseline_assessment
+            new_baseline_assessment = validate_patch_plan_sha_integrity(
+                plan,
+                archives=self.archives,
+                mode=selected_integrity_mode,
+            )
+
+        manifest, created, pre_hashes = manager.prepare(
+            new_baseline_guard=authenticate_new_baseline,
+        )
         records = {record["bdt"]: record for record in manifest["archives"]}
+        if created:
+            if new_baseline_assessment is None:
+                raise BackupError(
+                    "O novo baseline nao foi autenticado antes da publicacao."
+                )
+            integrity_assessment = new_baseline_assessment
+        else:
+            integrity_assessment = validate_patch_plan_sha_integrity(
+                plan,
+                archives=self.archives,
+                mode=selected_integrity_mode,
+                baseline_paths={
+                    archive.bdt_path: manager.directory
+                    / records[archive.bdt_path.name]["backup"]
+                    for archive in self.archives
+                },
+            )
         newly_touched = {archive.bdt_path for archive in plan.touched_archives}
         previously_patched = {
             record["bdt"]
@@ -3263,17 +3910,53 @@ class PatchEngine:
                 stream.close()
             handles.clear()
 
+            staged_assessment = validate_staged_patch_sha_integrity(
+                plan,
+                archives_to_stage,
+                baseline_paths={
+                    archive.bdt_path: manager.directory
+                    / records[archive.bdt_path.name]["backup"]
+                    for archive in archives_to_stage
+                },
+                staging_paths=stage_by_live,
+                expected_divergent_entries=(
+                    integrity_assessment.divergent_entries
+                ),
+                staging_identities=stage_identity_by_live,
+            )
+            validated_stage_sha256 = dict(
+                staged_assessment.validated_archive_sha256
+            )
+            validated_stage_identities = dict(
+                staged_assessment.validated_archive_identities
+            )
+
             for archive in archives_to_stage:
                 record = records[archive.bdt_path.name]
+                expected_identity = validated_stage_identities.get(archive.bdt_path)
+                expected_digest = validated_stage_sha256.get(archive.bdt_path)
+                if (
+                    expected_identity != stage_identity_by_live[archive.bdt_path]
+                    or not isinstance(expected_digest, str)
+                ):
+                    raise CompatibilityError(
+                        f"A verificacao do staging de {archive.bdt_path.name} "
+                        "nao devolveu uma autoridade completa."
+                    )
                 digest = _sha256_owned_regular(
                     stage_by_live[archive.bdt_path],
                     stage_identity_by_live[archive.bdt_path],
                 )
+                if digest != expected_digest:
+                    raise CompatibilityError(
+                        f"O staging de {archive.bdt_path.name} mudou depois da "
+                        "verificacao exata."
+                    )
                 if archive.bdt_path in newly_touched:
-                    record["patched_sha256"] = digest
+                    record["patched_sha256"] = expected_digest
                 else:
                     record.pop("patched_sha256", None)
-                transaction["new_sha256"][archive.bdt_path.name] = digest
+                transaction["new_sha256"][archive.bdt_path.name] = expected_digest
 
             # Steam, outro patcher ou o jogo nao podem trocar os arquivos entre
             # o planejamento e o commit.
