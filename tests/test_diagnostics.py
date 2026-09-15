@@ -9,7 +9,7 @@ from patcher import diagnostics
 
 def make_report(**overrides: object) -> str:
     values: dict[str, object] = {
-        "patcher_version": "0.9.3",
+        "patcher_version": "0.9.4",
         "operation": "install",
         "stage": "validate_build",
         "status": "failed",
@@ -38,7 +38,7 @@ class DiagnosticReportTests(unittest.TestCase):
             r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
         )
         self.assertRegex(report["created_at_utc"], r"^\d{4}-\d{2}-\d{2}T.*Z$")
-        self.assertEqual(report["patcher"]["version"], "0.9.3")
+        self.assertEqual(report["patcher"]["version"], "0.9.4")
         self.assertEqual(report["operation"]["stage"], "validate_build")
         self.assertIsNone(report["operation"]["stage_elapsed_seconds"])
         self.assertEqual(

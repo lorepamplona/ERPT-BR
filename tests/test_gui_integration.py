@@ -10,6 +10,40 @@ from patcher import patcher_gui
 
 
 class GuiIntegrationTests(unittest.TestCase):
+    def test_v094_production_installation_is_enabled(self) -> None:
+        self.assertEqual(patcher_gui.PATCHER_VERSION, "0.9.4")
+        self.assertFalse(patcher_gui.INSTALLATION_SUSPENDED)
+
+    def test_startup_never_labels_an_unsupported_build_as_ready(self) -> None:
+        app = mock.Mock()
+        info = patcher_gui.SteamBuildInfo("99999999", "identified")
+
+        patcher_gui.PatcherApp._finish_startup_status(app, info)
+
+        app._set_stage.assert_called_once_with(
+            "unsupported_build",
+            "Versao nao suportada (99999999) [ERPT-COMPAT-001]; "
+            "abra Diagnostico para copiar o relatorio.",
+            finished=True,
+        )
+        error = app._record_error.call_args.args[0]
+        self.assertIsInstance(error, patcher_gui.UnsupportedBuildError)
+        self.assertIs(error.build_info, info)
+
+    def test_startup_labels_only_the_pinned_build_as_ready(self) -> None:
+        app = mock.Mock()
+        info = patcher_gui.SteamBuildInfo("25080141", "identified")
+
+        with mock.patch.object(patcher_gui, "INSTALLATION_SUSPENDED", False):
+            patcher_gui.PatcherApp._finish_startup_status(app, info)
+
+        app._record_error.assert_not_called()
+        app._set_stage.assert_called_once_with(
+            "ready",
+            "Jogo compativel detectado; pronto para instalar.",
+            finished=True,
+        )
+
     @staticmethod
     def _diagnostic_state_stub() -> patcher_gui.PatcherApp:
         app = object.__new__(patcher_gui.PatcherApp)
@@ -170,6 +204,7 @@ class GuiIntegrationTests(unittest.TestCase):
         app._validated_context.return_value = (Path("selected-game"), "25080141")
 
         with (
+            mock.patch.object(patcher_gui, "INSTALLATION_SUSPENDED", True),
             mock.patch.object(patcher_gui, "PatchEngine") as engine_class,
             mock.patch.object(patcher_gui, "ensure_patch_data") as ensure_payload,
         ):
@@ -182,6 +217,54 @@ class GuiIntegrationTests(unittest.TestCase):
         self.assertIsInstance(error, patcher_gui.InstallationSuspendedError)
         self.assertEqual(error.code, "ERPT-AUDIO-001")
         self.assertIn("Nenhum arquivo novo sera alterado", str(error))
+
+    def test_install_worker_applies_payload_when_suspension_is_disabled(self) -> None:
+        app = mock.Mock()
+        app._diagnostic_lock = threading.Lock()
+        game_dir = Path("selected-game")
+        app._validated_context.return_value = (game_dir, "25080141")
+        patch_engine = mock.Mock()
+        patch_engine.load_archives.return_value = 42
+        patch_engine.apply_plan.return_value = (2, 0)
+        plan = mock.Mock()
+        plan.matched_file_count = 2
+        plan.payload_file_count = 2
+        plan.match_ratio = 1.0
+        plan.writes = (mock.Mock(), mock.Mock())
+        plan.unmatched_files = ()
+
+        with (
+            mock.patch.object(patcher_gui, "INSTALLATION_SUSPENDED", False),
+            mock.patch.object(
+                patcher_gui, "PatchEngine", return_value=patch_engine
+            ) as engine_class,
+            mock.patch.object(
+                patcher_gui, "ensure_patch_data", return_value=Path("payload")
+            ) as ensure_payload,
+            mock.patch.object(
+                patcher_gui, "build_authenticated_plan", return_value=plan
+            ) as build_plan,
+        ):
+            patcher_gui.PatcherApp._install_worker(app, "selected-game")
+
+        engine_class.assert_called_once()
+        patch_engine.load_archives.assert_called_once_with()
+        ensure_payload.assert_called_once()
+        build_plan.assert_called_once_with(
+            patch_engine, Path("payload"), progress=app._progress
+        )
+        patch_engine.apply_plan.assert_called_once_with(
+            plan,
+            progress=app._progress,
+            bhd_integrity_mode=patcher_gui.BHD_INTEGRITY_SCOPED_MOD,
+        )
+        app._report_failure.assert_not_called()
+        app._set_stage.assert_any_call(
+            "completed",
+            "Dublagem instalada com seguranca.",
+            write_state="committed",
+            finished=True,
+        )
 
     def test_suspension_code_is_preserved_in_diagnostic_state(self) -> None:
         app = self._diagnostic_state_stub()
@@ -374,6 +457,22 @@ class GuiIntegrationTests(unittest.TestCase):
                 patcher_gui.PatcherError, "Nenhum arquivo sera alterado"
             ):
                 patcher_gui.running_blockers()
+
+    def test_process_detection_includes_easy_anticheat_eos(self) -> None:
+        result = mock.Mock(
+            returncode=0,
+            stdout='"EasyAntiCheat_EOS.exe","123","Console","1","10.000 K"\n',
+        )
+        with (
+            mock.patch.object(patcher_gui.sys, "platform", "win32"),
+            mock.patch.dict(patcher_gui.os.environ, {"SystemRoot": r"C:\\Windows"}),
+            mock.patch.object(patcher_gui.Path, "is_file", return_value=True),
+            mock.patch.object(patcher_gui.subprocess, "run", return_value=result),
+        ):
+            self.assertEqual(
+                patcher_gui.running_blockers(),
+                ["Easy Anti-Cheat EOS"],
+            )
 
 
 if __name__ == "__main__":

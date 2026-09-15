@@ -352,7 +352,7 @@ def _validate_historical_marker(historical_payload: Path) -> str:
     marker, marker_sha256 = _read_json_regular(
         marker_path, label="Marker do payload histórico"
     )
-    expected = _marker_data(patch_data.PRODUCTION_PAYLOAD)
+    expected = _marker_data(patch_data.LEGACY_PAYLOAD_V081)
     if marker != expected:
         raise CandidateBuildError(
             "O marker do payload histórico não corresponde exatamente ao "
@@ -817,7 +817,7 @@ def collect_candidate_files(
     try:
         old_stats = patch_data.validate_patch_directory(
             historical_payload,
-            spec=patch_data.PRODUCTION_PAYLOAD,
+            spec=patch_data.LEGACY_PAYLOAD_V081,
             expected_file_sha256=historical_hashes,
         )
     except patch_data.PayloadValidationError as exc:
@@ -2025,9 +2025,9 @@ def build_candidate(
                 "build_fingerprint": rebuild_manifest["target"]["build_fingerprint"],
             },
             "provenance": {
-                "historical_payload_version": patch_data.PRODUCTION_PAYLOAD.version,
-                "historical_archive_sha256": patch_data.PRODUCTION_PAYLOAD.sha256,
-                "historical_tree_sha256": patch_data.PRODUCTION_PAYLOAD.tree_sha256,
+                "historical_payload_version": patch_data.LEGACY_PAYLOAD_V081.version,
+                "historical_archive_sha256": patch_data.LEGACY_PAYLOAD_V081.sha256,
+                "historical_tree_sha256": patch_data.LEGACY_PAYLOAD_V081.tree_sha256,
                 "historical_marker_sha256": historical_marker_sha256,
                 "rebuild_algorithm": rebuild_manifest["algorithm"],
                 "rebuild_manifest_sha256": rebuild_manifest_sha256,

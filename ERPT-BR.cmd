@@ -17,11 +17,11 @@ set "ERPTBR_ONECLICK_MUTEX_HELD=1"
 exit /b %ERRORLEVEL%
 
 :main
-echo ERPT-BR - hotfix de recuperacao
-echo -------------------------------
+echo ERPT-BR - instalador da dublagem PT-BR
+echo --------------------------------------
 echo Este script prepara o Python oficial no seu perfil, se necessario,
-echo instala a interface com as dependencias offline e abre a restauracao.
-echo A instalacao da dublagem no Elden Ring 1.17.1 esta suspensa.
+echo instala a interface com as dependencias offline e abre o instalador.
+echo Compativel com Elden Ring 1.17.1, Steam BuildID 25080141.
 echo Nenhum executavel proprio do projeto e usado.
 echo.
 
@@ -61,7 +61,7 @@ echo Baixando 29.452.944 bytes do instalador oficial em python.org...
 if errorlevel 1 goto :download_failed
 
 echo Conferindo tamanho, SHA-256, assinatura digital e publicador...
-"%ERPT_POWERSHELL%" -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop; Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -Force -ErrorAction Stop; $path=$env:ERPT_BOOTSTRAP_FILE; $expected='EDEC09C4853AEAE9AC36EFB8C9F95B6B8E2FEE65EEE56D9767A8B7C69C574403'; $publisher='CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'; $item=Get-Item -LiteralPath $path -Force; if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -ne 29452944) { throw 'Tamanho ou tipo do instalador invalido.' }; $hash=(Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; if($hash -ne $expected) { throw 'SHA-256 do instalador invalido.' }; $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -ne $publisher) { throw 'Assinatura ou publicador do instalador invalido.' }; $executable=[IO.Path]::ChangeExtension($path,'.exe'); [IO.File]::Move($path,$executable); $path=$executable; $stream=[IO.FileStream]::new($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read,4096,[IO.FileOptions]::DeleteOnClose); try { if($stream.Length -ne 29452944) { throw 'O instalador mudou antes da execucao.' }; $sha=[Security.Cryptography.SHA256]::Create(); try { $handleHash=[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','') } finally { $sha.Dispose() }; if($handleHash -ne $expected) { throw 'O instalador mudou antes da execucao.' }; $local=[Environment]::GetFolderPath('LocalApplicationData'); $target=Join-Path $local 'Programs\Python\Python313'; $log=Join-Path (Split-Path -Parent $path) 'python-3.13.15-install.log'; $q=[char]34; $arguments=@('/passive',('/log '+$q+$log+$q),'InstallAllUsers=0',('TargetDir='+$q+$target+$q),'Include_exe=1','Include_lib=1','Include_dev=1','Include_launcher=1','InstallLauncherAllUsers=0','Include_pip=1','Include_tcltk=1','Include_freethreaded=0','Include_test=0','Include_doc=0','Include_debug=0','Include_symbols=0','PrependPath=0','AppendPath=0','AssociateFiles=0','Shortcuts=0'); $process=Start-Process -FilePath $path -ArgumentList $arguments -Wait -PassThru; if($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) { throw ('O instalador oficial retornou '+$process.ExitCode+'.') } } finally { $stream.Dispose() }"
+"%ERPT_POWERSHELL%" -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop; Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -Force -ErrorAction Stop; $path=$env:ERPT_BOOTSTRAP_FILE; $expected='EDEC09C4853AEAE9AC36EFB8C9F95B6B8E2FEE65EEE56D9767A8B7C69C574403'; $publisher='CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US'; $item=Get-Item -LiteralPath $path -Force; if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -ne 29452944) { throw 'Tamanho ou tipo do instalador invalido.' }; $hash=(Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; if($hash -ne $expected) { throw 'SHA-256 do instalador invalido.' }; $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $path; if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -ne $publisher) { throw 'Assinatura ou publicador do instalador invalido.' }; $executable=[IO.Path]::ChangeExtension($path,'.exe'); [IO.File]::Move($path,$executable); $path=$executable; $stream=[IO.FileStream]::new($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read,4096,[IO.FileOptions]::DeleteOnClose); try { if($stream.Length -ne 29452944) { throw 'O instalador mudou antes da execucao.' }; $sha=[Security.Cryptography.SHA256]::Create(); try { $handleHash=[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','') } finally { $sha.Dispose() }; if($handleHash -ne $expected) { throw 'O instalador mudou antes da execucao.' }; $local=$env:LOCALAPPDATA; if([string]::IsNullOrWhiteSpace($local)) { throw 'LOCALAPPDATA ausente.' }; $target=Join-Path $local 'Programs\Python\Python313'; $log=Join-Path (Split-Path -Parent $path) 'python-3.13.15-install.log'; $q=[char]34; $arguments=@('/passive',('/log '+$q+$log+$q),'InstallAllUsers=0',('TargetDir='+$q+$target+$q),'Include_exe=1','Include_lib=1','Include_dev=1','Include_launcher=1','InstallLauncherAllUsers=0','Include_pip=1','Include_tcltk=1','Include_freethreaded=0','Include_test=0','Include_doc=0','Include_debug=0','Include_symbols=0','PrependPath=0','AppendPath=0','AssociateFiles=0','Shortcuts=0'); $process=Start-Process -FilePath $path -ArgumentList $arguments -Wait -PassThru; if($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) { throw ('O instalador oficial retornou '+$process.ExitCode+'.') } } finally { $stream.Dispose() }"
 if errorlevel 1 goto :direct_install_failed
 call :find_python
 if errorlevel 1 goto :python_install_invalid
@@ -158,7 +158,7 @@ goto :failed
 :invalid_package
 echo.
 echo ERRO: este pacote esta incompleto ou uma dependencia nao passou pelo SHA-256.
-echo Use ERPT-BR-v0.9.3-source-win64.zip da pagina Releases, extraido por inteiro.
+echo Use ERPT-BR-v0.9.4-Windows.zip da pagina Releases, extraido por inteiro.
 echo Nao use o ZIP automatico chamado apenas de Source code.
 goto :failed
 

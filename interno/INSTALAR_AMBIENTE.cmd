@@ -19,7 +19,7 @@ call :find_python
 if errorlevel 1 goto :python_missing
 
 set "ERPT_ROOT=%LOCALAPPDATA%\ERPT-BR"
-set "ERPT_VENV=%ERPT_ROOT%\venv-0.9.3"
+set "ERPT_VENV=%ERPT_ROOT%\venv-0.9.4"
 set "ERPT_SITE=%ERPT_VENV%\Lib\site-packages"
 
 "%ERPT_PY%" %ERPT_PY_SWITCH% -I -S -c "import os,stat; rp=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0); paths=(os.environ['ERPT_ROOT'],os.environ['ERPT_VENV']); roots_bad=[p for p in paths if os.path.lexists(p) and (not stat.S_ISDIR(os.lstat(p).st_mode) or bool(getattr(os.lstat(p),'st_file_attributes',0)&rp))]; walk=list(os.walk(paths[1],followlinks=False,onerror=lambda error: (_ for _ in ()).throw(error))) if not roots_bad and os.path.isdir(paths[1]) else []; nested=[os.path.join(base,name) for base,dirs,files in walk for name in dirs+files]; bad=roots_bad+[p for p in nested if bool(getattr(os.lstat(p),'st_file_attributes',0)&rp)]; raise SystemExit(1 if bad else 0)" >nul 2>&1
@@ -27,7 +27,7 @@ if errorlevel 1 goto :unsafe_environment
 
 if not exist "%ERPT_PACKAGE_ROOT%wheelhouse\" (
   echo ERRO: a pasta wheelhouse nao foi encontrada.
-  echo Baixe e extraia o arquivo source-win64.zip completo da pagina Releases.
+  echo Baixe e extraia ERPT-BR-v0.9.4-Windows.zip completo da pagina Releases.
   goto :failed
 )
 

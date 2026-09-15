@@ -564,7 +564,7 @@ class RebuildBnkPayloadTests(unittest.TestCase):
                 )
 
     def test_historical_payload_requires_pinned_tree_and_exact_marker(self) -> None:
-        spec = patch_data.PRODUCTION_PAYLOAD
+        spec = patch_data.LEGACY_PAYLOAD_V081
         stats = patch_data.PayloadStats(
             wem_count=spec.wem_count,
             bnk_count=spec.bnk_count,

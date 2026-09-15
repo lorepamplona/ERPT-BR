@@ -1,9 +1,9 @@
-name: Release source-only Windows patcher
+name: Release single-package Windows patcher
 
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v0.9.4"
 
 permissions: {}
 
@@ -89,15 +89,55 @@ jobs:
             --dest wheelhouse `
             -r patcher/requirements-win64.lock
 
-      - name: Build and verify source release
+      # Pre-requisito de promocao: o asset grande e autenticado precisa existir
+      # numa prerelease publicada de staging; ele nunca e anexado ao release final.
+      - name: Download authenticated staging payload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $stagingTag = "v0.9.4-rc.1"
+          $stagingAsset = "patch_data_v094_rc1_wwise135_v2.zip"
+          New-Item -ItemType Directory -Force payload-staging | Out-Null
+          try {
+            $staging = gh release view $stagingTag `
+              --repo "${{ github.repository }}" `
+              --json tagName,isDraft,isPrerelease | ConvertFrom-Json
+            if ($staging.isDraft -or -not $staging.isPrerelease) {
+              throw "A release de origem precisa ser uma prerelease publicada de staging."
+            }
+            gh release download $stagingTag `
+              --repo "${{ github.repository }}" `
+              --pattern $stagingAsset `
+              --dir payload-staging
+          } catch {
+            throw "Pre-requisito ausente: publique primeiro o asset de staging $stagingTag/$stagingAsset. $($_.Exception.Message)"
+          }
+          $payload = Join-Path "payload-staging" $stagingAsset
+          if (-not (Test-Path -LiteralPath $payload -PathType Leaf)) {
+            throw "Pre-requisito ausente: asset de staging $stagingTag/$stagingAsset"
+          }
+          $item = Get-Item -LiteralPath $payload
+          if ($item.Length -ne 588468447) {
+            throw "Tamanho do payload de staging divergiu: $($item.Length)"
+          }
+          $hash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne "430e9693a9b3313826e9f7c890cf592eb5b468d145bb405e8a4586002b877680") {
+            throw "SHA-256 do payload de staging divergiu: $hash"
+          }
+
+      - name: Build and verify single final ZIP
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force dist | Out-Null
-          $archive = "dist/ERPT-BR-${{ github.ref_name }}-source-win64.zip"
+          $archive = "dist/ERPT-BR-v0.9.4-Windows.zip"
           python tools/build_source_release.py `
             --version "${{ github.ref_name }}" `
             --wheelhouse wheelhouse `
+            --payload "payload-staging/patch_data_v094_rc1_wwise135_v2.zip" `
             --output $archive
           python tools/verify_source_release.py $archive
           $item = Get-Item $archive
@@ -113,7 +153,7 @@ jobs:
           }
           & "$env:SystemRoot\py.exe" -3.13 -I -S -c "import sys; raise SystemExit(sys.version_info[:3] != (3,13,15))"
           if ($LASTEXITCODE -ne 0) { throw "py.exe nao resolveu Python 3.13.15" }
-          $archive = "dist/ERPT-BR-${{ github.ref_name }}-source-win64.zip"
+          $archive = "dist/ERPT-BR-v0.9.4-Windows.zip"
           $smokeRoot = Join-Path $env:RUNNER_TEMP "erptbr-source-install-smoke"
           $smokeProfile = Join-Path $env:RUNNER_TEMP "erptbr-source-profile"
           Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot
@@ -123,17 +163,18 @@ jobs:
           $env:ERPTBR_INSTALL_ONLY = "1"
           & (Join-Path $packageRoot.FullName "ERPT-BR.cmd")
           if ($LASTEXITCODE -ne 0) { throw "Smoke test real de ERPT-BR.cmd falhou" }
-          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.3\Scripts\python.exe"
-          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.3\Lib\site-packages"
+          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Scripts\python.exe"
+          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Lib\site-packages"
           $sourceRoot = $packageRoot.FullName
           & $venvPython -I -S -c "import struct,sys,sysconfig; sys.path.extend((sys.argv[1],sys.argv[2])); import patcher.patcher_gui,tkinter,customtkinter; from Crypto.Cipher import AES; raise SystemExit(0 if sys.version_info[:3] == (3,13,15) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" $sourceRoot $venvSite
           if ($LASTEXITCODE -ne 0) { throw "Smoke test isolado do ambiente instalado falhou" }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: erpt-br-source-release
-          path: dist/ERPT-BR-${{ github.ref_name }}-source-win64.zip
+          name: erpt-br-v0.9.4-windows
+          path: dist/ERPT-BR-v0.9.4-Windows.zip
           if-no-files-found: error
+          compression-level: 0
           retention-days: 7
 
   publish:
@@ -150,34 +191,25 @@ jobs:
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: erpt-br-source-release
+          name: erpt-br-v0.9.4-windows
           path: dist
 
       - name: Attest immutable artifacts
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
-          subject-path: dist/ERPT-BR-${{ github.ref_name }}-source-win64.zip
+          subject-path: dist/ERPT-BR-v0.9.4-Windows.zip
 
       - name: Publish new GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          archive="dist/ERPT-BR-${{ github.ref_name }}-source-win64.zip"
+          archive="dist/ERPT-BR-v0.9.4-Windows.zip"
+          notes="docs/RELEASE-0.9.4.md"
           test -f "$archive"
-          if test "$GITHUB_REF_NAME" = "v0.9.3"; then
-            notes="docs/RELEASE-0.9.3.md"
-            test -f "$notes"
-            gh release create "${{ github.ref_name }}" "$archive" \
-              --repo "${{ github.repository }}" \
-              --verify-tag \
-              --notes-file "$notes" \
-              --latest \
-              --title "ERPT-BR ${{ github.ref_name }} — Hotfix de recuperação"
-          else
-            gh release create "${{ github.ref_name }}" "$archive" \
-              --repo "${{ github.repository }}" \
-              --verify-tag \
-              --generate-notes \
-              --prerelease \
-              --title "ERPT-BR ${{ github.ref_name }}"
-          fi
+          test -f "$notes"
+          gh release create "v0.9.4" "$archive" \
+            --repo "${{ github.repository }}" \
+            --verify-tag \
+            --notes-file "$notes" \
+            --latest \
+            --title "ERPT-BR v0.9.4 — Instalador completo para Windows"

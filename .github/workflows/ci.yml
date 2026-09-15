@@ -102,13 +102,11 @@ jobs:
             throw "encerramento forcado de processo encontrado"
           }
 
-      - name: Build and verify the source-only ZIP
+      - name: Smoke test installer directly from checkout
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $wheelhouse = Join-Path $env:RUNNER_TEMP "erpt-wheelhouse"
-          $version = "v" + (python -c "import patcher; print(patcher.__version__)")
-          $archive = Join-Path $env:RUNNER_TEMP "ERPT-BR-$version-source-win64.zip"
+          $wheelhouse = Join-Path $PWD "wheelhouse"
           New-Item -ItemType Directory -Force $wheelhouse | Out-Null
           python -m pip --isolated download `
             --disable-pip-version-check `
@@ -117,11 +115,6 @@ jobs:
             --only-binary=:all: `
             --dest $wheelhouse `
             -r patcher/requirements-win64.lock
-          python tools/build_source_release.py `
-            --version $version `
-            --wheelhouse $wheelhouse `
-            --output $archive
-          python tools/verify_source_release.py $archive
 
           if (-not (Test-Path "$env:SystemRoot\py.exe")) {
             throw "Python Launcher oficial ausente no runner Windows"
@@ -129,16 +122,14 @@ jobs:
           & "$env:SystemRoot\py.exe" -3.13 -I -S -c "import sys; raise SystemExit(sys.version_info[:3] != (3,13,15))"
           if ($LASTEXITCODE -ne 0) { throw "py.exe nao resolveu Python 3.13.15" }
 
-          $smokeRoot = Join-Path $env:RUNNER_TEMP "erptbr-source-install-smoke"
           $smokeProfile = Join-Path $env:RUNNER_TEMP "erptbr-source-profile"
-          Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot
-          $packageRoot = Get-ChildItem -LiteralPath $smokeRoot -Directory | Select-Object -First 1
+          $packageRoot = (Get-Location).Path
           $env:LOCALAPPDATA = $smokeProfile
           $env:ERPTBR_NONINTERACTIVE = "1"
           $env:ERPTBR_INSTALL_ONLY = "1"
-          & (Join-Path $packageRoot.FullName "ERPT-BR.cmd")
+          & (Join-Path $packageRoot "ERPT-BR.cmd")
           if ($LASTEXITCODE -ne 0) { throw "Smoke test real de ERPT-BR.cmd falhou" }
-          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.3\Scripts\python.exe"
-          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.3\Lib\site-packages"
-          & $venvPython -I -S -c "import struct,sys,sysconfig; sys.path.extend((sys.argv[1],sys.argv[2])); import patcher.patcher_gui,tkinter,customtkinter; from Crypto.Cipher import AES; raise SystemExit(0 if sys.version_info[:3] == (3,13,15) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" $packageRoot.FullName $venvSite
+          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Scripts\python.exe"
+          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Lib\site-packages"
+          & $venvPython -I -S -c "import struct,sys,sysconfig; sys.path.extend((sys.argv[1],sys.argv[2])); import patcher.patcher_gui,tkinter,customtkinter; from Crypto.Cipher import AES; raise SystemExit(0 if sys.version_info[:3] == (3,13,15) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" $packageRoot $venvSite
           if ($LASTEXITCODE -ne 0) { throw "Smoke test isolado do ambiente instalado falhou" }

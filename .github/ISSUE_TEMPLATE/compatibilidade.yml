@@ -16,7 +16,7 @@ body:
     attributes:
       label: "Versão do ERPT-BR"
       description: "Informe a versão mostrada no instalador ou no nome do arquivo baixado."
-      placeholder: "Ex.: 0.9.3"
+      placeholder: "Ex.: 0.9.4"
     validations:
       required: true
 

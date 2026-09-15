@@ -157,7 +157,7 @@ class CandidatePayloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             marker = build_candidate_payload._marker_data(
-                patch_data.PRODUCTION_PAYLOAD
+                patch_data.LEGACY_PAYLOAD_V081
             )
             (root / patch_data.MARKER_FILENAME).write_text(
                 json.dumps(marker), encoding="utf-8"

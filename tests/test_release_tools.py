@@ -34,7 +34,7 @@ class ReleaseBytesTests(unittest.TestCase):
 
     def test_verifier_rejects_oversized_member_before_extraction(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            archive = Path(temp) / "oversized.zip"
+            archive = Path(temp) / verify_source_release.FINAL_ARCHIVE_NAME
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as out:
                 for relative in sorted(verify_source_release.EXPECTED_FILES):
                     data = (
@@ -42,17 +42,17 @@ class ReleaseBytesTests(unittest.TestCase):
                         if relative == "README.md"
                         else b""
                     )
-                    out.writestr(f"ERPT-BR-v0.9.3/{relative}", data)
+                    out.writestr(f"ERPT-BR-v0.9.4/{relative}", data)
 
             with self.assertRaisesRegex(SystemExit, "Membro grande demais"):
                 verify_source_release.verify(str(archive))
 
     def test_verifier_rejects_excessive_member_count_before_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            archive = Path(temp) / "many-members.zip"
+            archive = Path(temp) / verify_source_release.FINAL_ARCHIVE_NAME
             with zipfile.ZipFile(archive, "w") as out:
                 for index in range(len(verify_source_release.EXPECTED_FILES) + 1):
-                    out.writestr(f"ERPT-BR-v0.9.3/extra-{index}.txt", b"")
+                    out.writestr(f"ERPT-BR-v0.9.4/extra-{index}.txt", b"")
 
             with self.assertRaisesRegex(SystemExit, "quantidade inesperada"):
                 verify_source_release.verify(str(archive))
@@ -111,6 +111,19 @@ class ReleaseBytesTests(unittest.TestCase):
             "http://",
         ):
             self.assertNotIn(forbidden.casefold(), source.casefold())
+
+    def test_verifier_requires_production_gui_safety_controls(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "patcher" / "patcher_gui.py").read_text(encoding="utf-8")
+
+        verify_source_release._verify_gui_controls(source)
+        stale = source.replace(
+            "bhd_integrity_mode=BHD_INTEGRITY_SCOPED_MOD",
+            "bhd_integrity_mode='strict'",
+            1,
+        )
+        with self.assertRaisesRegex(SystemExit, "Controles obrigatorios"):
+            verify_source_release._verify_gui_controls(stale)
 
     def test_internal_launcher_repairs_missing_dependencies_once(self) -> None:
         root = Path(__file__).resolve().parents[1]

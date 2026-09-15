@@ -1,10 +1,10 @@
-"""Structural Wwise BNK merge for a future corrected ERPT-BR installer.
+"""Structural Wwise BNK merge used by the corrected ERPT-BR installer.
 
 The translation payload can be older than the user's game build.  Replacing a
 whole bank in that situation also removes events and embedded media introduced
 by the game update.  This module treats the vanilla bank as the authority for
 its structure and only imports translated sound objects/media that already
-exist in that bank.  The recovery-only 0.9.3 release does not activate it.
+exist in that bank.  ERPT-BR 0.9.4 uses this strategy for Elden Ring 1.17.1.
 """
 
 from __future__ import annotations

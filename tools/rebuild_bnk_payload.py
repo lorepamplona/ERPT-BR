@@ -352,7 +352,7 @@ def _default_payload_root() -> Path:
 
 
 def _expected_payload_marker() -> dict[str, int | str]:
-    spec = patch_data.PRODUCTION_PAYLOAD
+    spec = patch_data.LEGACY_PAYLOAD_V081
     return {
         "schema": patch_data.MARKER_SCHEMA,
         "payload_version": spec.version,
@@ -374,7 +374,7 @@ def validate_historical_payload(payload_root: Path) -> str:
     try:
         stats = patch_data.validate_patch_directory(
             payload_root,
-            spec=patch_data.PRODUCTION_PAYLOAD,
+            spec=patch_data.LEGACY_PAYLOAD_V081,
         )
     except patch_data.PayloadValidationError as exc:
         raise RebuildError(
@@ -390,10 +390,10 @@ def validate_historical_payload(payload_root: Path) -> str:
             "PayloadSpec v0.8.1 fixado."
         )
     if (
-        stats.wem_count != patch_data.PRODUCTION_PAYLOAD.wem_count
-        or stats.bnk_count != patch_data.PRODUCTION_PAYLOAD.bnk_count
-        or stats.total_size != patch_data.PRODUCTION_PAYLOAD.uncompressed_size
-        or stats.max_file_size != patch_data.PRODUCTION_PAYLOAD.max_file_size
+        stats.wem_count != patch_data.LEGACY_PAYLOAD_V081.wem_count
+        or stats.bnk_count != patch_data.LEGACY_PAYLOAD_V081.bnk_count
+        or stats.total_size != patch_data.LEGACY_PAYLOAD_V081.uncompressed_size
+        or stats.max_file_size != patch_data.LEGACY_PAYLOAD_V081.max_file_size
     ):
         raise RebuildError("Estatísticas do payload histórico divergem do v0.8.1.")
     return marker_sha256
@@ -1757,9 +1757,9 @@ def rebuild(
                 ],
             },
             "payload_input": {
-                "payload_version": patch_data.PRODUCTION_PAYLOAD.version,
-                "archive_sha256": patch_data.PRODUCTION_PAYLOAD.sha256,
-                "tree_sha256": patch_data.PRODUCTION_PAYLOAD.tree_sha256,
+                "payload_version": patch_data.LEGACY_PAYLOAD_V081.version,
+                "archive_sha256": patch_data.LEGACY_PAYLOAD_V081.sha256,
+                "tree_sha256": patch_data.LEGACY_PAYLOAD_V081.tree_sha256,
                 "marker_sha256": historical_marker_sha256,
                 "bank_alias_tree_sha256": input_bank_digest,
                 "wem_name_tree_sha256": wem_name_digest,

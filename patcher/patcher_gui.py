@@ -20,7 +20,7 @@ if (
     _legacy_messagebox.showwarning(
         "ERPT-BR - migracao necessaria",
         "Este executavel foi descontinuado por seguranca e nao aplicara o patch.\n\n"
-        "Baixe o pacote 'source-win64.zip' na pagina Releases do projeto, "
+        "Baixe o pacote 'ERPT-BR-v0.9.4-Windows.zip' na pagina Releases do projeto, "
         "extraia-o e execute ERPT-BR.cmd.\n\n"
         "Se uma versao antiga da dublagem ja foi instalada, primeiro use "
         "Steam > Elden Ring > Propriedades > Arquivos instalados > "
@@ -46,6 +46,7 @@ import customtkinter as ctk
 
 try:  # Suporta ``python -m patcher.patcher_gui`` e execucao direta do arquivo.
     from .engine import (
+        BHD_INTEGRITY_SCOPED_MOD,
         BackupError,
         CompatibilityError,
         LegacyBackupError,
@@ -64,6 +65,7 @@ try:  # Suporta ``python -m patcher.patcher_gui`` e execucao direta do arquivo.
     from .diagnostics import build_diagnostic_report
 except ImportError:  # pragma: no cover - caminho usado pelo script interno
     from engine import (
+        BHD_INTEGRITY_SCOPED_MOD,
         BackupError,
         CompatibilityError,
         LegacyBackupError,
@@ -82,13 +84,14 @@ except ImportError:  # pragma: no cover - caminho usado pelo script interno
     from diagnostics import build_diagnostic_report
 
 
-PATCHER_VERSION = "0.9.3"
+PATCHER_VERSION = "0.9.4"
 SUPPORTED_GAME_VERSION = "1.17.1"
 SUPPORTED_STEAM_BUILD_IDS = frozenset({"25080141"})
 STEAM_APP_ID = "1245620"
 PROJECT_URL = "https://github.com/lorepamplona/ERPT-BR"
-INCIDENT_URL = f"{PROJECT_URL}/blob/main/docs/INCIDENTE-0.9.1.md"
-INSTALLATION_SUSPENDED = True
+DETAILS_URL = f"{PROJECT_URL}/releases/tag/v0.9.4"
+# Chave de emergência: pode ser reativada sem remover o fluxo de restauração.
+INSTALLATION_SUSPENDED = False
 COMPATIBILITY_ISSUE_URL = (
     f"{PROJECT_URL}/issues/new?template=compatibilidade.yml"
 )
@@ -107,6 +110,7 @@ BLOCKING_EXECUTABLES = {
     "eldenring.exe": "Elden Ring",
     "start_protected_game.exe": "Inicializador do Easy Anti-Cheat",
     "easyanticheat.exe": "Easy Anti-Cheat",
+    "easyanticheat_eos.exe": "Easy Anti-Cheat EOS",
     "easyanticheat_launcher.exe": "Easy Anti-Cheat Launcher",
     "easyanticheat_epic.exe": "Easy Anti-Cheat (Epic)",
 }
@@ -161,20 +165,18 @@ class UnsupportedBuildError(CompatibilityError):
 
 
 class InstallationSuspendedError(CompatibilityError):
-    """Bloqueia novas gravacoes enquanto o payload do build e reconstruido."""
+    """Bloqueia novas gravacoes quando a chave preventiva esta ativa."""
 
     code = "ERPT-AUDIO-001"
 
     def __init__(self) -> None:
         super().__init__(
             f"INSTALACAO TEMPORARIAMENTE SUSPENSA [{self.code}]\n\n"
-            "O pacote usado pelas versoes 0.9.1 e 0.9.2 substitui bancos de "
-            "audio mais antigos que os do Elden Ring 1.17.1 e pode remover sons "
-            "da interface e de cutscenes. Nenhum arquivo novo sera alterado.\n\n"
-            "Se a dublagem ja foi instalada, use 'Corrigir audio (restaurar)' "
-            "agora. Se nao houver um backup valido, use Steam > Propriedades > "
-            "Arquivos instalados > Verificar integridade. Nao entre no modo "
-            "online antes de restaurar."
+            "A instalacao foi desativada preventivamente pelo projeto. Nenhum "
+            "arquivo novo sera alterado.\n\n"
+            "Use 'Corrigir audio (restaurar)' se precisar voltar aos arquivos "
+            "originais. Se nao houver um backup valido, use Steam > Propriedades "
+            "> Arquivos instalados > Verificar integridade."
         )
 
 
@@ -416,7 +418,11 @@ class PatcherApp(ctk.CTk):
         self._diagnostic_stage_elapsed: int | None = None
         self._diagnostic_write_state = "not_started"
         self._diagnostic_progress = (0, 0)
-        self._diagnostic_status = "Instalacao suspensa; restaure o audio original."
+        self._diagnostic_status = (
+            "Instalacao suspensa; restaure o audio original."
+            if INSTALLATION_SUSPENDED
+            else "Pronto para instalar a dublagem."
+        )
         self._detected_build_id: str | None = None
         self._build_read_status = "not_checked"
         self._detected_build_path_key: str | None = None
@@ -434,7 +440,11 @@ class PatcherApp(ctk.CTk):
 
         self.path_var = ctk.StringVar(value="")
         self.status_var = ctk.StringVar(
-            value="Instalacao suspensa; restaure o audio original."
+            value=(
+                "Instalacao suspensa; restaure o audio original."
+                if INSTALLATION_SUSPENDED
+                else "Pronto para instalar a dublagem."
+            )
         )
         self.build_var = ctk.StringVar(
             value=f"ERPT-BR {PATCHER_VERSION} | alvo: Elden Ring {SUPPORTED_GAME_VERSION}"
@@ -490,11 +500,37 @@ class PatcherApp(ctk.CTk):
                     ),
                 )
             elif self._last_error_code is None:
-                self._set_stage(
-                    "installation_suspended",
-                    "Instalacao suspensa; use Corrigir audio (restaurar).",
-                    finished=True,
-                )
+                self._finish_startup_status(build_info)
+
+    def _finish_startup_status(self, build_info: SteamBuildInfo) -> None:
+        """Nunca anuncia compatibilidade antes de validar o BuildID detectado."""
+
+        if build_info.build_id not in SUPPORTED_STEAM_BUILD_IDS:
+            error = UnsupportedBuildError(
+                build_info,
+                before_game_writes=True,
+            )
+            detected = build_info.build_id or "nao identificado"
+            self._set_stage(
+                "unsupported_build",
+                f"Versao nao suportada ({detected}) [{error.code}]; "
+                "abra Diagnostico para copiar o relatorio.",
+                finished=True,
+            )
+            self._record_error(error)
+            return
+        if INSTALLATION_SUSPENDED:
+            self._set_stage(
+                "installation_suspended",
+                "Instalacao suspensa; use Corrigir audio (restaurar).",
+                finished=True,
+            )
+            return
+        self._set_stage(
+            "ready",
+            "Jogo compativel detectado; pronto para instalar.",
+            finished=True,
+        )
 
     def _build_interface(self) -> None:
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -513,20 +549,29 @@ class PatcherApp(ctk.CTk):
         ).pack(anchor="w", pady=(4, 0))
 
         notice = ctk.CTkFrame(
-            self, fg_color="#321719", border_color="#9f3c43", border_width=1
+            self,
+            fg_color="#321719" if INSTALLATION_SUSPENDED else "#172d24",
+            border_color="#9f3c43" if INSTALLATION_SUSPENDED else "#39785b",
+            border_width=1,
         )
         notice.pack(fill="x", padx=30, pady=(0, 12))
         ctk.CTkLabel(
             notice,
             text=(
-                "⚠ INSTALAÇÃO SUSPENSA NO ELDEN RING 1.17.1\n"
-                "As versões 0.9.1/0.9.2 podem remover cliques do menu e sons de cutscenes.\n"
-                "Se já instalou, não entre online: use Corrigir áudio (restaurar)."
+                (
+                    "⚠ INSTALAÇÃO TEMPORARIAMENTE SUSPENSA\n"
+                    "Nenhum arquivo novo será alterado; a restauração continua disponível."
+                )
+                if INSTALLATION_SUSPENDED
+                else (
+                    "✓ CORREÇÃO 0.9.4 PARA ELDEN RING 1.17.1\n"
+                    "Bancos reconstruídos e validados; inicie o jogo normalmente pela Steam."
+                )
             ),
             justify="left",
             anchor="w",
             font=ctk.CTkFont("Segoe UI", 12),
-            text_color="#ffd7d9",
+            text_color="#ffd7d9" if INSTALLATION_SUSPENDED else "#d8f4e4",
         ).pack(fill="x", padx=14, pady=10)
 
         path_card = ctk.CTkFrame(self, fg_color=CARD)
@@ -563,12 +608,16 @@ class PatcherApp(ctk.CTk):
         action_row.pack(fill="x", padx=30, pady=(0, 12))
         self.install_button = ctk.CTkButton(
             action_row,
-            text="Instalação suspensa",
+            text=(
+                "Instalação suspensa"
+                if INSTALLATION_SUSPENDED
+                else "Instalar dublagem"
+            ),
             height=42,
             font=ctk.CTkFont("Segoe UI", 13, "bold"),
-            fg_color="#5a3033",
-            hover_color="#754046",
-            text_color="#f1d7d8",
+            fg_color="#5a3033" if INSTALLATION_SUSPENDED else GOLD,
+            hover_color="#754046" if INSTALLATION_SUSPENDED else GOLD_HOVER,
+            text_color="#f1d7d8" if INSTALLATION_SUSPENDED else "#111116",
             command=self._start_install,
         )
         self.install_button.pack(side="left", fill="x", expand=True, padx=(0, 8))
@@ -590,7 +639,7 @@ class PatcherApp(ctk.CTk):
             width=90,
             fg_color="#343449",
             hover_color="#484860",
-            command=lambda: webbrowser.open(INCIDENT_URL),
+            command=lambda: webbrowser.open(DETAILS_URL),
         )
         self.project_button.pack(side="left")
         self.report_button = ctk.CTkButton(
@@ -1200,7 +1249,7 @@ class PatcherApp(ctk.CTk):
             )
             if optional_movie_payload_present(APP_ROOT):
                 raise CompatibilityError(
-                    "Esta versao candidata instala somente o audio. Foi encontrada "
+                    "Esta versao instala somente o audio. Foi encontrada "
                     "uma pasta movie/movie_dlc ao lado do instalador, mas o pacote "
                     "antigo de cutscenes nao possui manifesto criptografico publico. "
                     "Mova essas pastas para outro local e execute novamente. Nenhum "
@@ -1288,7 +1337,11 @@ class PatcherApp(ctk.CTk):
                 "Criando backup e preparando arquivos transacionais...",
                 write_state="transaction_active",
             )
-            applied, unmatched = engine.apply_plan(plan, progress=self._progress)
+            applied, unmatched = engine.apply_plan(
+                plan,
+                progress=self._progress,
+                bhd_integrity_mode=BHD_INTEGRITY_SCOPED_MOD,
+            )
             self._progress(1, 1)
             self._set_stage(
                 "completed",

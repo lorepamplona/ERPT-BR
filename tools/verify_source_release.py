@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Valida de forma independente a allowlist do release source-only."""
+"""Valida de forma independente o unico ZIP final do ERPT-BR."""
 
 from __future__ import annotations
 
@@ -9,9 +9,12 @@ import hashlib
 import os
 import re
 import stat
+import struct
+import unicodedata
 import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 
 SOURCE_FILES = frozenset(
@@ -49,12 +52,28 @@ WHEEL_SHA256 = {
         "c75b52aacc6c0c260f204cbdd834f76edc9fb0d8e0da9fbf8352ef58202564e2"
     ),
 }
-EXPECTED_FILES = SOURCE_FILES | frozenset(WHEEL_SHA256)
+FINAL_VERSION = "v0.9.4"
+FINAL_ARCHIVE_NAME = "ERPT-BR-v0.9.4-Windows.zip"
+PAYLOAD_ARCHIVE_NAME = "patch_data_v094.zip"
+PAYLOAD_ARCHIVE_SIZE = 588_468_447
+PAYLOAD_SHA256 = "430e9693a9b3313826e9f7c890cf592eb5b468d145bb405e8a4586002b877680"
+PAYLOAD_TREE_SHA256 = "8544e551832c929eecad0cf9898204fd673bd4a37a0a6f37433865afbb3556cb"
+PAYLOAD_FILE_COUNT = 9_241
+PAYLOAD_WEM_COUNT = 8_969
+PAYLOAD_BNK_COUNT = 272
+PAYLOAD_UNCOMPRESSED_SIZE = 605_706_607
+PAYLOAD_MAX_FILE_SIZE = 74_956_066
+STREAM_CHUNK_SIZE = 1024 * 1024
+
+EXPECTED_FILES = SOURCE_FILES | frozenset(WHEEL_SHA256) | {PAYLOAD_ARCHIVE_NAME}
 FORBIDDEN_SUFFIXES = {".exe", ".dll", ".bat", ".ps1", ".scr", ".com"}
+# These limits continue to apply to every ordinary source/wheel member.  The
+# immutable payload gets its own exact, narrower exception below.
 MAX_MEMBER_SIZE = 5 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED = 8 * 1024 * 1024
 MAX_TOTAL_COMPRESSED = 8 * 1024 * 1024
 MAX_ARCHIVE_SIZE = 8 * 1024 * 1024
+MAX_FINAL_ARCHIVE_SIZE = PAYLOAD_ARCHIVE_SIZE + MAX_ARCHIVE_SIZE
 FORBIDDEN_SOURCE_PATTERNS = {
     "exec(compile(": "execucao dinamica de codigo",
     "taskkill": "encerramento forcado de processos",
@@ -75,8 +94,196 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _sha256_stream(stream: BinaryIO) -> tuple[int, str]:
+    size = 0
+    digest = hashlib.sha256()
+    while chunk := stream.read(STREAM_CHUNK_SIZE):
+        size += len(chunk)
+        digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _verify_gui_controls(gui_source: str) -> None:
+    """Impede promover uma GUI que volte ao modo BHD estrito por acidente."""
+
+    required = (
+        'PATCHER_VERSION = "0.9.4"',
+        "INSTALLATION_SUSPENDED = False",
+        "BHD_INTEGRITY_SCOPED_MOD",
+        "bhd_integrity_mode=BHD_INTEGRITY_SCOPED_MOD",
+        '"easyanticheat_eos.exe": "Easy Anti-Cheat EOS"',
+    )
+    missing = [control for control in required if control not in gui_source]
+    if missing:
+        raise SystemExit(
+            f"Controles obrigatorios ausentes da interface: {missing}"
+        )
+
+
+def _safe_payload_relative(name: str) -> str:
+    prefix = "patch_data/"
+    if not name.startswith(prefix):
+        raise SystemExit(f"Layout inesperado no payload: {name!r}")
+    relative = name[len(prefix) :]
+    if not relative or "\\" in relative or ":" in relative or "\x00" in relative:
+        raise SystemExit(f"Caminho inseguro no payload: {name!r}")
+    parts = relative.split("/")
+    path = PurePosixPath(*parts)
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in parts)
+        or path.as_posix() != relative
+        or any(part.endswith((" ", ".")) for part in parts)
+        or path.suffix.casefold() not in {".wem", ".bnk"}
+    ):
+        raise SystemExit(f"Caminho inseguro no payload: {name!r}")
+    return relative
+
+
+def _verify_nested_payload(
+    outer: zipfile.ZipFile, payload_info: zipfile.ZipInfo
+) -> None:
+    """Authenticate and inflate the nested payload using bounded streaming."""
+
+    try:
+        with outer.open(payload_info, "r") as payload_stream:
+            size, digest = _sha256_stream(payload_stream)
+    except (OSError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error) as exc:
+        raise SystemExit("Falha de integridade ou CRC no payload embutido.") from exc
+    if size != PAYLOAD_ARCHIVE_SIZE or digest != PAYLOAD_SHA256:
+        raise SystemExit(
+            "Payload embutido divergente: "
+            f"tamanho={size}, SHA-256={digest}"
+        )
+
+    tree_digest = hashlib.sha256()
+    wem_count = 0
+    bnk_count = 0
+    total_size = 0
+    max_file_size = 0
+    try:
+        # ZipExtFile is seekable here because the outer payload member is
+        # ZIP_STORED.  This lets us inspect the nested ZIP without a 588 MB
+        # allocation or a second temporary artifact.
+        with outer.open(payload_info, "r") as payload_stream:
+            if not payload_stream.seekable():
+                raise SystemExit("O payload embutido nao permite validacao aninhada.")
+            with zipfile.ZipFile(payload_stream, "r") as payload:
+                if payload.comment:
+                    raise SystemExit("O payload embutido contem comentario inesperado.")
+                infos = payload.infolist()
+                if len(infos) != PAYLOAD_FILE_COUNT:
+                    raise SystemExit(
+                        "Quantidade de arquivos divergente no payload embutido: "
+                        f"esperado {PAYLOAD_FILE_COUNT}, obtido {len(infos)}"
+                    )
+                normalized: list[tuple[str, zipfile.ZipInfo]] = []
+                seen: set[str] = set()
+                for info in infos:
+                    relative = _safe_payload_relative(info.filename)
+                    canonical = unicodedata.normalize("NFC", relative).casefold()
+                    if canonical in seen:
+                        raise SystemExit(
+                            f"Nome duplicado no payload embutido: {relative!r}"
+                        )
+                    seen.add(canonical)
+                    unix_mode = (info.external_attr >> 16) & 0xFFFF
+                    if (
+                        info.is_dir()
+                        or stat.S_IFMT(unix_mode) not in (0, stat.S_IFREG)
+                        or info.flag_bits & 0x1
+                        or info.compress_type
+                        not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+                        or info.file_size < 0
+                        or info.file_size > PAYLOAD_MAX_FILE_SIZE
+                    ):
+                        raise SystemExit(
+                            f"Membro inseguro no payload embutido: {info.filename!r}"
+                        )
+                    total_size += info.file_size
+                    if total_size > PAYLOAD_UNCOMPRESSED_SIZE:
+                        raise SystemExit(
+                            "O payload embutido excede o tamanho descompactado fixado."
+                        )
+                    max_file_size = max(max_file_size, info.file_size)
+                    if relative.casefold().endswith(".wem"):
+                        wem_count += 1
+                    else:
+                        bnk_count += 1
+                    normalized.append((relative, info))
+
+                expected_order = sorted(
+                    normalized,
+                    key=lambda item: (
+                        unicodedata.normalize("NFC", item[0]).casefold(),
+                        item[0],
+                    ),
+                )
+                if normalized != expected_order:
+                    raise SystemExit(
+                        "As entradas do payload embutido estao fora da ordem canonica."
+                    )
+
+                for relative, info in normalized:
+                    encoded = relative.encode("utf-8")
+                    tree_digest.update(struct.pack("<I", len(encoded)))
+                    tree_digest.update(encoded)
+                    tree_digest.update(struct.pack("<Q", info.file_size))
+                    inflated = 0
+                    header = bytearray()
+                    with payload.open(info, "r") as member:
+                        while chunk := member.read(STREAM_CHUNK_SIZE):
+                            inflated += len(chunk)
+                            tree_digest.update(chunk)
+                            if len(header) < 12:
+                                header.extend(chunk[: 12 - len(header)])
+                    if inflated != info.file_size:
+                        raise SystemExit(
+                            f"Leitura incompleta no payload embutido: {relative!r}"
+                        )
+                    if relative.casefold().endswith(".wem"):
+                        if (
+                            len(header) < 12
+                            or header[:4] != b"RIFF"
+                            or header[8:12] != b"WAVE"
+                        ):
+                            raise SystemExit(
+                                f"Cabecalho WEM invalido no payload: {relative!r}"
+                            )
+                    elif len(header) < 4 or header[:4] != b"BKHD":
+                        raise SystemExit(
+                            f"Cabecalho BNK invalido no payload: {relative!r}"
+                        )
+    except SystemExit:
+        raise
+    except (OSError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error) as exc:
+        raise SystemExit(
+            "Falha ao abrir ou descompactar o payload embutido."
+        ) from exc
+
+    if (
+        wem_count != PAYLOAD_WEM_COUNT
+        or bnk_count != PAYLOAD_BNK_COUNT
+        or total_size != PAYLOAD_UNCOMPRESSED_SIZE
+        or max_file_size != PAYLOAD_MAX_FILE_SIZE
+    ):
+        raise SystemExit(
+            "Estatisticas divergentes no payload embutido: "
+            f"WEM={wem_count}, BNK={bnk_count}, bytes={total_size}, "
+            f"maior={max_file_size}"
+        )
+    actual_tree = tree_digest.hexdigest()
+    if actual_tree != PAYLOAD_TREE_SHA256:
+        raise SystemExit(
+            "SHA-256 da arvore do payload embutido divergiu: "
+            f"esperado {PAYLOAD_TREE_SHA256}, obtido {actual_tree}"
+        )
+
+
 def verify(path: str) -> None:
     archive_path = Path(path)
+    if archive_path.name != FINAL_ARCHIVE_NAME:
+        raise SystemExit(f"Nome obrigatorio do ZIP final: {FINAL_ARCHIVE_NAME}")
     try:
         metadata = archive_path.lstat()
     except OSError as exc:
@@ -86,10 +293,11 @@ def verify(path: str) -> None:
     if (
         not stat.S_ISREG(metadata.st_mode)
         or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
         or bool(reparse_flag and file_attributes & reparse_flag)
     ):
         raise SystemExit("O release precisa ser um arquivo regular, nao um link.")
-    if metadata.st_size > MAX_ARCHIVE_SIZE:
+    if metadata.st_size > MAX_FINAL_ARCHIVE_SIZE:
         raise SystemExit("O arquivo ZIP excede o limite fisico do release.")
 
     with contextlib.ExitStack() as stack:
@@ -100,7 +308,8 @@ def verify(path: str) -> None:
         opened = os.fstat(archive_stream.fileno())
         if (
             not stat.S_ISREG(opened.st_mode)
-            or opened.st_size > MAX_ARCHIVE_SIZE
+            or opened.st_nlink != 1
+            or opened.st_size > MAX_FINAL_ARCHIVE_SIZE
             or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
         ):
             raise SystemExit("O release mudou ou excede o limite antes da leitura.")
@@ -144,15 +353,30 @@ def verify(path: str) -> None:
                 raise SystemExit(f"Membro criptografado proibido no release: {name}")
             if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
                 raise SystemExit(f"Compressao inesperada no release: {name}")
-            if info.file_size > MAX_MEMBER_SIZE or info.compress_size > MAX_MEMBER_SIZE:
-                raise SystemExit(f"Membro grande demais no release: {name}")
-            total_uncompressed += info.file_size
-            total_compressed += info.compress_size
-            if (
-                total_uncompressed > MAX_TOTAL_UNCOMPRESSED
-                or total_compressed > MAX_TOTAL_COMPRESSED
-            ):
-                raise SystemExit("O tamanho total declarado do release excede o limite.")
+            if relative == PAYLOAD_ARCHIVE_NAME:
+                if (
+                    info.file_size != PAYLOAD_ARCHIVE_SIZE
+                    or info.compress_size != PAYLOAD_ARCHIVE_SIZE
+                    or info.compress_type != zipfile.ZIP_STORED
+                ):
+                    raise SystemExit(
+                        "O payload precisa ter tamanho exato e usar ZIP_STORED."
+                    )
+            else:
+                if (
+                    info.file_size > MAX_MEMBER_SIZE
+                    or info.compress_size > MAX_MEMBER_SIZE
+                ):
+                    raise SystemExit(f"Membro grande demais no release: {name}")
+                total_uncompressed += info.file_size
+                total_compressed += info.compress_size
+                if (
+                    total_uncompressed > MAX_TOTAL_UNCOMPRESSED
+                    or total_compressed > MAX_TOTAL_COMPRESSED
+                ):
+                    raise SystemExit(
+                        "O tamanho total declarado do release excede o limite."
+                    )
             unix_mode = (info.external_attr >> 16) & 0xFFFF
             file_type = stat.S_IFMT(unix_mode)
             if info.is_dir() or file_type not in (0, stat.S_IFREG):
@@ -163,8 +387,8 @@ def verify(path: str) -> None:
         if len(roots) != 1:
             raise SystemExit("O ZIP precisa ter uma unica pasta raiz.")
         root = next(iter(roots))
-        match = re.fullmatch(r"ERPT-BR-v(\d+\.\d+\.\d+)", root)
-        if not match:
+        expected_root = f"ERPT-BR-{FINAL_VERSION}"
+        if root != expected_root:
             raise SystemExit(f"Pasta raiz inesperada no release: {root!r}")
         if relative_names != EXPECTED_FILES:
             missing = sorted(EXPECTED_FILES - relative_names)
@@ -188,12 +412,16 @@ def verify(path: str) -> None:
         # parsing a different view if the archive is replaced during validation.
         try:
             member_bytes = {
-                relative: archive.read(info) for relative, info in members.items()
+                relative: archive.read(info)
+                for relative, info in members.items()
+                if relative != PAYLOAD_ARCHIVE_NAME
             }
         except (OSError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error) as exc:
             raise SystemExit(
                 "Falha de integridade, descompressao ou CRC em membro do release."
             ) from exc
+
+        _verify_nested_payload(archive, members[PAYLOAD_ARCHIVE_NAME])
 
         for relative in SOURCE_FILES:
             if PurePosixPath(relative).suffix.casefold() not in {".py", ".cmd"}:
@@ -354,13 +582,14 @@ def verify(path: str) -> None:
                 "Hash e assinatura precisam anteceder a execucao do instalador oficial."
             )
 
-        version = match.group(1)
+        version = FINAL_VERSION.removeprefix("v")
         init_source = member_bytes["patcher/__init__.py"].decode("utf-8")
         gui_source = member_bytes["patcher/patcher_gui.py"].decode("utf-8")
         if f'__version__ = "{version}"' not in init_source or (
             f'PATCHER_VERSION = "{version}"' not in gui_source
         ):
             raise SystemExit("Versao da pasta raiz diverge do codigo empacotado.")
+        _verify_gui_controls(gui_source)
         lock_source = member_bytes["patcher/requirements-win64.lock"].decode("utf-8")
         for expected in WHEEL_SHA256.values():
             if f"--hash=sha256:{expected}" not in lock_source:
@@ -368,13 +597,34 @@ def verify(path: str) -> None:
                     f"Hash de wheel ausente do requirements-win64.lock: {expected}"
                 )
 
+        try:
+            final_opened = os.fstat(archive_stream.fileno())
+            current = archive_path.lstat()
+        except OSError as exc:
+            raise SystemExit("O release mudou durante a validacao.") from exc
+        current_attributes = getattr(current, "st_file_attributes", 0)
+        if (
+            not stat.S_ISREG(final_opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or final_opened.st_nlink != 1
+            or current.st_nlink != 1
+            or final_opened.st_size != metadata.st_size
+            or current.st_size != metadata.st_size
+            or (final_opened.st_dev, final_opened.st_ino)
+            != (metadata.st_dev, metadata.st_ino)
+            or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or stat.S_ISLNK(current.st_mode)
+            or bool(reparse_flag and current_attributes & reparse_flag)
+        ):
+            raise SystemExit("O release mudou durante a validacao.")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive")
     args = parser.parse_args()
     verify(args.archive)
-    print("Release source verificado por allowlist e hashes.")
+    print("ZIP final verificado: fontes, wheels e payload aninhado autenticados.")
     return 0
 
 

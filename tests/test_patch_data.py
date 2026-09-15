@@ -56,7 +56,7 @@ def make_spec(
     bnk_count: int = 1,
     uncompressed_size: int = len(WEM_BYTES) + len(BNK_BYTES),
     max_file_size: int = len(WEM_BYTES),
-    url: str = "https://example.invalid/patch_data_test.zip",
+    url: str | None = "https://example.invalid/patch_data_test.zip",
     tree_files: dict[str, bytes] | None = None,
 ) -> patch_data.PayloadSpec:
     if tree_files is None:
@@ -116,8 +116,28 @@ class FakeResponse(io.BytesIO):
 
 
 class ProductionManifestTests(unittest.TestCase):
-    def test_production_manifest_is_pinned_to_v081(self) -> None:
+    def test_production_manifest_is_pinned_to_bundled_v094(self) -> None:
         spec = patch_data.PRODUCTION_PAYLOAD
+        self.assertEqual(spec.version, "v0.9.4")
+        self.assertEqual(spec.archive_name, "patch_data_v094.zip")
+        self.assertIsNone(spec.url)
+        self.assertEqual(spec.archive_size, 588_468_447)
+        self.assertEqual(
+            spec.sha256,
+            "430e9693a9b3313826e9f7c890cf592eb5b468d145bb405e8a4586002b877680",
+        )
+        self.assertEqual(spec.wem_count, 8_969)
+        self.assertEqual(spec.bnk_count, 272)
+        self.assertEqual(spec.file_count, 9_241)
+        self.assertEqual(spec.uncompressed_size, 605_706_607)
+        self.assertEqual(spec.max_file_size, 74_956_066)
+        self.assertEqual(
+            spec.tree_sha256,
+            "8544e551832c929eecad0cf9898204fd673bd4a37a0a6f37433865afbb3556cb",
+        )
+
+    def test_legacy_manifest_remains_explicitly_pinned_to_v081(self) -> None:
+        spec = patch_data.LEGACY_PAYLOAD_V081
         self.assertEqual(spec.version, "v0.8.1")
         self.assertEqual(spec.archive_name, "patch_data_v081.zip")
         self.assertEqual(
@@ -148,6 +168,12 @@ class ProductionManifestTests(unittest.TestCase):
             patch_data.PayloadSpec(
                 "x", "x.zip", "https://example.test/x", 1, "bad", 1, 0, 1, 1, "0" * 64
             )
+
+    def test_specs_allow_an_explicit_bundled_only_payload(self) -> None:
+        spec = patch_data.PayloadSpec(
+            "x", "x.zip", None, 1, "0" * 64, 1, 0, 1, 1, "0" * 64
+        )
+        self.assertIsNone(spec.url)
 
 
 class ArchiveValidationTests(unittest.TestCase):
@@ -830,6 +856,24 @@ class DownloadAndDiscoveryTests(unittest.TestCase):
         )
         self.assertTrue(any("SHA-256" in line for line in logs))
 
+    def test_download_refuses_a_bundled_only_spec_without_side_effects(self) -> None:
+        destination = self.root / "new-cache" / "payload.zip"
+        bundled_spec = make_spec(self.archive_bytes, url=None)
+
+        def forbidden_opener(request, timeout):
+            self.fail("a bundled-only payload must never access the network")
+
+        with self.assertRaisesRegex(
+            patch_data.PayloadDownloadError, "acompanha o pacote oficial"
+        ):
+            patch_data.download_archive(
+                destination,
+                spec=bundled_spec,
+                opener=forbidden_opener,
+            )
+
+        self.assertFalse(destination.parent.exists())
+
     def test_download_does_not_touch_preplanted_predictable_part_file(self) -> None:
         destination = self.root / "cache" / self.spec.archive_name
         destination.parent.mkdir(parents=True)
@@ -1034,6 +1078,48 @@ class DownloadAndDiscoveryTests(unittest.TestCase):
         self.assertEqual(result, cache / "patch_data")
         self.assertEqual((result / "enus/wem/one.wem").read_bytes(), WEM_BYTES)
         self.assertTrue((result / patch_data.MARKER_FILENAME).is_file())
+
+    def test_ensure_uses_a_valid_bundled_archive_without_network(self) -> None:
+        adjacent = self.root / "release"
+        adjacent.mkdir()
+        bundled_spec = make_spec(self.archive_bytes, url=None)
+        (adjacent / bundled_spec.archive_name).write_bytes(self.archive_bytes)
+
+        def forbidden_opener(request, timeout):
+            self.fail("a bundled-only payload must never access the network")
+
+        result = patch_data.ensure_patch_data(
+            adjacent,
+            cache_dir=self.root / "cache",
+            spec=bundled_spec,
+            opener=forbidden_opener,
+        )
+
+        self.assertEqual(result, self.root / "cache" / "patch_data")
+        self.assertEqual((result / "enus/one.bnk").read_bytes(), BNK_BYTES)
+
+    def test_ensure_fails_closed_when_bundled_archive_is_invalid(self) -> None:
+        adjacent = self.root / "release"
+        adjacent.mkdir()
+        bundled_spec = make_spec(self.archive_bytes, url=None)
+        bundled_archive = adjacent / bundled_spec.archive_name
+        bundled_archive.write_bytes(b"corrupt")
+
+        def forbidden_opener(request, timeout):
+            self.fail("a bundled-only payload must never access the network")
+
+        with self.assertRaisesRegex(
+            patch_data.PayloadValidationError,
+            "nenhum download alternativo foi tentado",
+        ):
+            patch_data.ensure_patch_data(
+                adjacent,
+                cache_dir=self.root / "cache",
+                spec=bundled_spec,
+                opener=forbidden_opener,
+            )
+
+        self.assertEqual(bundled_archive.read_bytes(), b"corrupt")
 
     def test_ensure_skips_invalid_adjacent_zip_then_downloads_pinned_data(self) -> None:
         adjacent = self.root / "release"

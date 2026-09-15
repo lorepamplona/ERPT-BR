@@ -10,7 +10,7 @@ cd /d "%ERPT_PACKAGE_ROOT%"
 
 if not defined LOCALAPPDATA set "LOCALAPPDATA=%ERPT_PACKAGE_ROOT%.localdata"
 set "ERPT_ROOT=%LOCALAPPDATA%\ERPT-BR"
-set "ERPT_VENV=%ERPT_ROOT%\venv-0.9.3"
+set "ERPT_VENV=%ERPT_ROOT%\venv-0.9.4"
 set "ERPT_SITE=%ERPT_VENV%\Lib\site-packages"
 
 if not exist "%ERPT_VENV%\Scripts\pythonw.exe" (
