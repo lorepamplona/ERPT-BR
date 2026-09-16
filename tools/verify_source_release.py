@@ -531,6 +531,9 @@ def verify(path: str) -> None:
             "Local\\ERPTBR_Installer_",
             'set "ERPTBR_INTERNAL_CALL=1"',
             ":invalid_package",
+            "ERPT-PACKAGE-001",
+            "Arquivo obrigatorio ausente:",
+            "use Extrair Tudo primeiro",
         )
         missing_one_click = [
             item for item in required_one_click_controls if item not in one_click
@@ -543,6 +546,10 @@ def verify(path: str) -> None:
         if one_click.count("goto :install_direct") != 1:
             raise SystemExit(
                 "O fallback direto so pode ser alcancado quando o WinGet esta ausente."
+            )
+        if "docs\\INCIDENTE-0.9.1.md" in one_click:
+            raise SystemExit(
+                "Documentacao informativa nao pode bloquear a instalacao."
             )
         for relative, expected in WHEEL_SHA256.items():
             bootstrap_relative = relative.replace("/", "\\")

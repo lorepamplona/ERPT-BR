@@ -97,6 +97,10 @@ class ReleaseBytesTests(unittest.TestCase):
         self.assertIn('set "ERPTBR_INTERNAL_CALL=1"', source)
         self.assertIn("Local\\ERPTBR_Installer_", source)
         self.assertNotIn("Local\\ERPTBR_Installer_v091", source)
+        self.assertNotIn("docs\\INCIDENTE-0.9.1.md", source)
+        self.assertIn("ERPT-PACKAGE-001", source)
+        self.assertIn("Arquivo obrigatorio ausente:", source)
+        self.assertIn("use Extrair Tudo primeiro", source)
         self.assertLess(
             source.index("rem Recusa ZIP automatico"),
             source.index("call :find_python"),
