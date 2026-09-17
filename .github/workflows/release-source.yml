@@ -3,7 +3,7 @@ name: Release single-package Windows patcher
 on:
   push:
     tags:
-      - "v0.9.4"
+      - "v0.9.5"
 
 permissions: {}
 
@@ -90,7 +90,8 @@ jobs:
             -r patcher/requirements-win64.lock
 
       # Pre-requisito de promocao: o asset grande e autenticado precisa existir
-      # numa prerelease publicada de staging; ele nunca e anexado ao release final.
+      # numa prerelease publicada de staging. Seus arquivos sao incorporados de
+      # forma plana; o ZIP de staging nunca e aninhado no release final.
       - name: Download authenticated staging payload
         shell: pwsh
         env:
@@ -133,7 +134,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force dist | Out-Null
-          $archive = "dist/ERPT-BR-v0.9.4-Windows.zip"
+          $archive = "dist/ERPT-BR-v0.9.5-Windows.zip"
           python tools/build_source_release.py `
             --version "${{ github.ref_name }}" `
             --wheelhouse wheelhouse `
@@ -153,7 +154,7 @@ jobs:
           }
           & "$env:SystemRoot\py.exe" -3.13 -I -S -c "import sys; raise SystemExit(sys.version_info[:3] != (3,13,15))"
           if ($LASTEXITCODE -ne 0) { throw "py.exe nao resolveu Python 3.13.15" }
-          $archive = "dist/ERPT-BR-v0.9.4-Windows.zip"
+          $archive = "dist/ERPT-BR-v0.9.5-Windows.zip"
           $smokeRoot = Join-Path $env:RUNNER_TEMP "erptbr-source-install-smoke"
           $smokeProfile = Join-Path $env:RUNNER_TEMP "erptbr-source-profile"
           Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot
@@ -163,16 +164,16 @@ jobs:
           $env:ERPTBR_INSTALL_ONLY = "1"
           & (Join-Path $packageRoot.FullName "ERPT-BR.cmd")
           if ($LASTEXITCODE -ne 0) { throw "Smoke test real de ERPT-BR.cmd falhou" }
-          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Scripts\python.exe"
-          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Lib\site-packages"
+          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.5\Scripts\python.exe"
+          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.5\Lib\site-packages"
           $sourceRoot = $packageRoot.FullName
           & $venvPython -I -S -c "import struct,sys,sysconfig; sys.path.extend((sys.argv[1],sys.argv[2])); import patcher.patcher_gui,tkinter,customtkinter; from Crypto.Cipher import AES; raise SystemExit(0 if sys.version_info[:3] == (3,13,15) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" $sourceRoot $venvSite
           if ($LASTEXITCODE -ne 0) { throw "Smoke test isolado do ambiente instalado falhou" }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: erpt-br-v0.9.4-windows
-          path: dist/ERPT-BR-v0.9.4-Windows.zip
+          name: erpt-br-v0.9.5-windows
+          path: dist/ERPT-BR-v0.9.5-Windows.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -191,25 +192,119 @@ jobs:
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: erpt-br-v0.9.4-windows
+          name: erpt-br-v0.9.5-windows
           path: dist
 
       - name: Attest immutable artifacts
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
-          subject-path: dist/ERPT-BR-v0.9.4-Windows.zip
+          subject-path: dist/ERPT-BR-v0.9.5-Windows.zip
 
       - name: Publish new GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          archive="dist/ERPT-BR-v0.9.4-Windows.zip"
-          notes="docs/RELEASE-0.9.4.md"
+          archive="dist/ERPT-BR-v0.9.5-Windows.zip"
+          notes="docs/RELEASE-0.9.5.md"
+          tag="v0.9.5"
+          title="ERPT-BR v0.9.5 — Pacote plano para Windows"
           test -f "$archive"
           test -f "$notes"
-          gh release create "v0.9.4" "$archive" \
-            --repo "${{ github.repository }}" \
-            --verify-tag \
-            --notes-file "$notes" \
-            --latest \
-            --title "ERPT-BR v0.9.4 — Instalador completo para Windows"
+          local_size="$(wc -c < "$archive" | tr -d '[:space:]')"
+          local_digest="sha256:$(sha256sum "$archive" | cut -d' ' -f1)"
+
+          # Confirma que a tag anotada ja existe, equivalente ao --verify-tag.
+          gh api "repos/${{ github.repository }}/git/ref/tags/$tag" --silent
+
+          # O endpoint /releases/tags nao retorna drafts de forma confiavel.
+          # Liste releases autenticadas e reutilize somente uma release exata,
+          # tornando uma nova execucao segura sem sobrescrever nenhum asset.
+          releases="$RUNNER_TEMP/erptbr-releases.json"
+          gh api "repos/${{ github.repository }}/releases?per_page=100" > "$releases"
+          existing_count="$(jq --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | length' "$releases")"
+          if [ "$existing_count" = "0" ]; then
+            create_request="$RUNNER_TEMP/erptbr-v095-create.json"
+            create_response="$RUNNER_TEMP/erptbr-v095-release.json"
+            jq -n \
+              --arg tag "$tag" \
+              --arg title "$title" \
+              --rawfile body "$notes" \
+              '{tag_name:$tag, name:$title, body:$body, draft:true, prerelease:false, make_latest:"false"}' \
+              > "$create_request"
+            gh api --method POST \
+              "repos/${{ github.repository }}/releases" \
+              --input "$create_request" > "$create_response"
+            release_id="$(jq -r '.id' "$create_response")"
+            release_was_draft="true"
+          elif [ "$existing_count" = "1" ]; then
+            if ! jq -e \
+              --arg tag "$tag" \
+              --arg title "$title" \
+              --rawfile body "$notes" \
+              '.[] | select(.tag_name == $tag and .prerelease == false and .name == $title and .body == $body)' \
+              "$releases" > /dev/null; then
+              echo "A release existente nao corresponde exatamente ao release esperado." >&2
+              exit 1
+            fi
+            release_id="$(jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .id' "$releases")"
+            release_was_draft="$(jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .draft' "$releases")"
+          else
+            echo "Mais de uma release usa a tag $tag." >&2
+            exit 1
+          fi
+          test -n "$release_id"
+          upload_template="$(gh api "repos/${{ github.repository }}/releases/${release_id}" --jq '.upload_url')"
+          upload_url="$(printf '%s' "$upload_template" | sed 's/{.*$//')"
+          test -n "$upload_url"
+
+          # O upload comum do gh identificava o ZIP grande como
+          # application/octet-stream. O endpoint de assets aceita o MIME
+          # explicito, e a release permanece em rascunho se qualquer
+          # verificacao abaixo falhar.
+          assets="$RUNNER_TEMP/erptbr-v095-assets.json"
+          gh api "repos/${{ github.repository }}/releases/${release_id}/assets" > "$assets"
+          asset_count="$(jq 'length' "$assets")"
+          if [ "$asset_count" = "1" ] && [ "$(jq -r '.[0].state' "$assets")" = "starter" ]; then
+            # A API documenta que um 502 pode deixar um asset incompleto neste
+            # estado. Remova somente esse residuo dentro do draft exato.
+            test "$release_was_draft" = "true"
+            stale_id="$(jq -r '.[0].id' "$assets")"
+            gh api --method DELETE "repos/${{ github.repository }}/releases/assets/${stale_id}"
+            asset_count="0"
+          fi
+          if [ "$asset_count" = "0" ]; then
+            test "$release_was_draft" = "true"
+            response="$RUNNER_TEMP/erptbr-v095-upload.json"
+            curl --fail-with-body --silent --show-error --location \
+              --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/zip" \
+              --data-binary "@$archive" \
+              --output "$response" \
+              "${upload_url}?name=ERPT-BR-v0.9.5-Windows.zip"
+            gh api "repos/${{ github.repository }}/releases/${release_id}/assets" > "$assets"
+            asset_count="$(jq 'length' "$assets")"
+          fi
+
+          asset_name="$(jq -r '.[0].name' "$assets")"
+          asset_type="$(jq -r '.[0].content_type' "$assets")"
+          asset_size="$(jq -r '.[0].size' "$assets")"
+          asset_digest="$(jq -r '.[0].digest' "$assets")"
+          asset_state="$(jq -r '.[0].state' "$assets")"
+          test "$asset_count" = "1"
+          test "$asset_name" = "ERPT-BR-v0.9.5-Windows.zip"
+          test "$asset_type" = "application/zip"
+          test "$asset_size" = "$local_size"
+          test "$asset_digest" = "$local_digest"
+          test "$asset_state" = "uploaded"
+
+          publish_request="$RUNNER_TEMP/erptbr-v095-publish.json"
+          publish_response="$RUNNER_TEMP/erptbr-v095-published.json"
+          jq -n '{draft:false, make_latest:"true"}' > "$publish_request"
+          gh api --method PATCH \
+            "repos/${{ github.repository }}/releases/${release_id}" \
+            --input "$publish_request" > "$publish_response"
+          test "$(jq -r '.draft' "$publish_response")" = "false"
+          test "$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name')" = "$tag"

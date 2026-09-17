@@ -4,7 +4,7 @@
 
 - O projeto não publica executável próprio.
 - O único download destinado ao usuário é
-  `ERPT-BR-v0.9.4-Windows.zip`. Ele contém o código-fonte do patcher, scripts
+  `ERPT-BR-v0.9.5-Windows.zip`. Ele contém o código-fonte do patcher, scripts
   `.cmd` transparentes, dependências travadas e o payload de áudio autenticado.
 - Os ZIPs automáticos **Source code** do GitHub não são instaladores e não
   contêm o pacote completo.
@@ -24,14 +24,13 @@
 - O Python é instalado no perfil atual, não é adicionado ao `PATH` e não há
   tentativa de autoelevação. O executável oficial não é incluído no ZIP do mod.
 
-## Integridade do payload 0.9.4
+## Integridade do payload de áudio
 
 O payload foi reconstruído sobre os bancos originais do Elden Ring 1.17.1,
 Steam BuildID `25080141`. O patcher valida antes do uso:
 
-- nome interno: `patch_data_v094.zip`;
-- tamanho: `588468447` bytes;
-- SHA-256: `430e9693a9b3313826e9f7c890cf592eb5b468d145bb405e8a4586002b877680`;
+- formato distribuído na 0.9.5: pasta plana `patch_data`, sem arquivo compactado
+  de áudio aninhado;
 - SHA-256 canônico da árvore:
   `8544e551832c929eecad0cf9898204fd673bd4a37a0a6f37433865afbb3556cb`;
 - inventário: 8.969 WEMs e 272 aliases BNK, total de 9.241 arquivos;
@@ -41,11 +40,19 @@ Steam BuildID `25080141`. O patcher valida antes do uso:
 Qualquer diferença de tamanho, hash, estrutura, inventário ou caminho faz o
 patcher recusar o payload antes de escrever no jogo.
 
+O arquivo de origem usado para montar essa árvore permanece fixado em
+588.468.447 bytes e SHA-256
+`430e9693a9b3313826e9f7c890cf592eb5b468d145bb405e8a4586002b877680`.
+Ele é apenas uma entrada autenticada do workflow e não é colocado dentro do ZIP
+entregue ao usuário.
+
 ## Easy Anti-Cheat e modo online
 
 O patcher não usa Mod Engine 3, não inicia Elden Ring, não injeta bibliotecas,
 não altera o Easy Anti-Cheat e não muda a forma de iniciar o jogo pela Steam. A
-versão 0.9.4 foi validada em uma sessão real com EAC e conexão online ativos.
+correção de áudio usada pela 0.9.5 foi validada em uma sessão real da 0.9.4 com
+EAC e conexão online ativos. A 0.9.5 altera somente a forma de distribuição do
+mesmo payload autenticado.
 
 Os dados modificados nos BDTs não são acompanhados de regravação ou reassinatura
 dos índices BHD. Consequentemente, 8.973 recursos deixam de corresponder aos
@@ -65,7 +72,7 @@ GitHub registra o digest SHA-256 do asset e gera um atestado de proveniência pe
 GitHub Actions. Para verificar o pacote com a CLI do GitHub:
 
 ```text
-gh attestation verify ERPT-BR-v0.9.4-Windows.zip --repo lorepamplona/ERPT-BR
+gh attestation verify ERPT-BR-v0.9.5-Windows.zip --repo lorepamplona/ERPT-BR
 ```
 
 O workflow usa dependências travadas por SHA de commit e não deve sobrescrever

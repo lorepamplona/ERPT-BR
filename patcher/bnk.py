@@ -4,7 +4,8 @@ The translation payload can be older than the user's game build.  Replacing a
 whole bank in that situation also removes events and embedded media introduced
 by the game update.  This module treats the vanilla bank as the authority for
 its structure and only imports translated sound objects/media that already
-exist in that bank.  ERPT-BR 0.9.4 uses this strategy for Elden Ring 1.17.1.
+exist in that bank.  ERPT-BR 0.9.4 and later use this strategy for Elden Ring
+1.17.1.
 """
 
 from __future__ import annotations

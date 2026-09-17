@@ -10,8 +10,8 @@ from patcher import patcher_gui
 
 
 class GuiIntegrationTests(unittest.TestCase):
-    def test_v094_production_installation_is_enabled(self) -> None:
-        self.assertEqual(patcher_gui.PATCHER_VERSION, "0.9.4")
+    def test_v095_production_installation_is_enabled(self) -> None:
+        self.assertEqual(patcher_gui.PATCHER_VERSION, "0.9.5")
         self.assertFalse(patcher_gui.INSTALLATION_SUSPENDED)
 
     def test_startup_never_labels_an_unsupported_build_as_ready(self) -> None:

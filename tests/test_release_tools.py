@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from tools import build_source_release, verify_source_release
 
@@ -32,30 +33,53 @@ class ReleaseBytesTests(unittest.TestCase):
 
             self.assertEqual(build_source_release.release_bytes(source), data)
 
+    def test_text_line_endings_are_checkout_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lf = root / "LICENSE"
+            crlf = root / "README.md"
+            lf.write_bytes(b"linha 1\nlinha 2\n")
+            crlf.write_bytes(b"linha 1\r\nlinha 2\r\n")
+
+            expected = b"linha 1\nlinha 2\n"
+            self.assertEqual(build_source_release.release_bytes(lf), expected)
+            self.assertEqual(build_source_release.release_bytes(crlf), expected)
+
     def test_verifier_rejects_oversized_member_before_extraction(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             archive = Path(temp) / verify_source_release.FINAL_ARCHIVE_NAME
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as out:
-                for relative in sorted(verify_source_release.EXPECTED_FILES):
-                    data = (
-                        b"x" * (verify_source_release.MAX_MEMBER_SIZE + 1)
-                        if relative == "README.md"
-                        else b""
-                    )
-                    out.writestr(f"ERPT-BR-v0.9.4/{relative}", data)
+            package_root = f"ERPT-BR-{verify_source_release.FINAL_VERSION}"
+            with mock.patch.object(verify_source_release, "PAYLOAD_FILE_COUNT", 0):
+                with zipfile.ZipFile(
+                    archive, "w", compression=zipfile.ZIP_DEFLATED
+                ) as out:
+                    for relative in sorted(verify_source_release.EXPECTED_FILES):
+                        data = (
+                            b"x" * (verify_source_release.MAX_MEMBER_SIZE + 1)
+                            if relative == "README.md"
+                            else b""
+                        )
+                        out.writestr(
+                            build_source_release.zip_info(
+                                f"{package_root}/{relative}"
+                            ),
+                            data,
+                        )
 
-            with self.assertRaisesRegex(SystemExit, "Membro grande demais"):
-                verify_source_release.verify(str(archive))
+                with self.assertRaisesRegex(SystemExit, "Membro grande demais"):
+                    verify_source_release.verify(str(archive))
 
     def test_verifier_rejects_excessive_member_count_before_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             archive = Path(temp) / verify_source_release.FINAL_ARCHIVE_NAME
-            with zipfile.ZipFile(archive, "w") as out:
-                for index in range(len(verify_source_release.EXPECTED_FILES) + 1):
-                    out.writestr(f"ERPT-BR-v0.9.4/extra-{index}.txt", b"")
+            package_root = f"ERPT-BR-{verify_source_release.FINAL_VERSION}"
+            with mock.patch.object(verify_source_release, "PAYLOAD_FILE_COUNT", 0):
+                with zipfile.ZipFile(archive, "w") as out:
+                    for index in range(len(verify_source_release.EXPECTED_FILES) + 1):
+                        out.writestr(f"{package_root}/extra-{index}.txt", b"")
 
-            with self.assertRaisesRegex(SystemExit, "quantidade inesperada"):
-                verify_source_release.verify(str(archive))
+                with self.assertRaisesRegex(SystemExit, "quantidade inesperada"):
+                    verify_source_release.verify(str(archive))
 
     def test_builder_and_verifier_share_the_source_allowlist(self) -> None:
         self.assertEqual(
@@ -100,6 +124,7 @@ class ReleaseBytesTests(unittest.TestCase):
         self.assertNotIn("docs\\INCIDENTE-0.9.1.md", source)
         self.assertIn("ERPT-PACKAGE-001", source)
         self.assertIn("Arquivo obrigatorio ausente:", source)
+        self.assertIn("Pasta obrigatoria ausente: patch_data", source)
         self.assertIn("use Extrair Tudo primeiro", source)
         self.assertLess(
             source.index("rem Recusa ZIP automatico"),

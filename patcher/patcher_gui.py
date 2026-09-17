@@ -20,7 +20,7 @@ if (
     _legacy_messagebox.showwarning(
         "ERPT-BR - migracao necessaria",
         "Este executavel foi descontinuado por seguranca e nao aplicara o patch.\n\n"
-        "Baixe o pacote 'ERPT-BR-v0.9.4-Windows.zip' na pagina Releases do projeto, "
+        "Baixe o pacote 'ERPT-BR-v0.9.5-Windows.zip' na pagina Releases do projeto, "
         "extraia-o e execute ERPT-BR.cmd.\n\n"
         "Se uma versao antiga da dublagem ja foi instalada, primeiro use "
         "Steam > Elden Ring > Propriedades > Arquivos instalados > "
@@ -84,12 +84,12 @@ except ImportError:  # pragma: no cover - caminho usado pelo script interno
     from diagnostics import build_diagnostic_report
 
 
-PATCHER_VERSION = "0.9.4"
+PATCHER_VERSION = "0.9.5"
 SUPPORTED_GAME_VERSION = "1.17.1"
 SUPPORTED_STEAM_BUILD_IDS = frozenset({"25080141"})
 STEAM_APP_ID = "1245620"
 PROJECT_URL = "https://github.com/lorepamplona/ERPT-BR"
-DETAILS_URL = f"{PROJECT_URL}/releases/tag/v0.9.4"
+DETAILS_URL = f"{PROJECT_URL}/releases/tag/v0.9.5"
 # Chave de emergência: pode ser reativada sem remover o fluxo de restauração.
 INSTALLATION_SUSPENDED = False
 COMPATIBILITY_ISSUE_URL = (
@@ -564,8 +564,8 @@ class PatcherApp(ctk.CTk):
                 )
                 if INSTALLATION_SUSPENDED
                 else (
-                    "✓ CORREÇÃO 0.9.4 PARA ELDEN RING 1.17.1\n"
-                    "Bancos reconstruídos e validados; inicie o jogo normalmente pela Steam."
+                    "✓ ERPT-BR 0.9.5 PARA ELDEN RING 1.17.1\n"
+                    "Pacote plano validado; inicie o jogo normalmente pela Steam."
                 )
             ),
             justify="left",

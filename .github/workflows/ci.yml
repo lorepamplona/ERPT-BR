@@ -124,12 +124,15 @@ jobs:
 
           $smokeProfile = Join-Path $env:RUNNER_TEMP "erptbr-source-profile"
           $packageRoot = (Get-Location).Path
+          # O checkout nao traz o payload grande. Este smoke testa somente o
+          # bootstrap; a arvore real e autenticada no workflow de release.
+          New-Item -ItemType Directory -Force (Join-Path $packageRoot "patch_data") | Out-Null
           $env:LOCALAPPDATA = $smokeProfile
           $env:ERPTBR_NONINTERACTIVE = "1"
           $env:ERPTBR_INSTALL_ONLY = "1"
           & (Join-Path $packageRoot "ERPT-BR.cmd")
           if ($LASTEXITCODE -ne 0) { throw "Smoke test real de ERPT-BR.cmd falhou" }
-          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Scripts\python.exe"
-          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.4\Lib\site-packages"
+          $venvPython = Join-Path $smokeProfile "ERPT-BR\venv-0.9.5\Scripts\python.exe"
+          $venvSite = Join-Path $smokeProfile "ERPT-BR\venv-0.9.5\Lib\site-packages"
           & $venvPython -I -S -c "import struct,sys,sysconfig; sys.path.extend((sys.argv[1],sys.argv[2])); import patcher.patcher_gui,tkinter,customtkinter; from Crypto.Cipher import AES; raise SystemExit(0 if sys.version_info[:3] == (3,13,15) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" $packageRoot $venvSite
           if ($LASTEXITCODE -ne 0) { throw "Smoke test isolado do ambiente instalado falhou" }

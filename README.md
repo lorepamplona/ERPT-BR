@@ -3,17 +3,19 @@
 Projeto de dublagem em Português Brasileiro para Elden Ring no PC.
 
 > [!IMPORTANT]
-> A versão **0.9.4** volta a instalar a dublagem no Elden Ring **1.17.1**
+> A versão **0.9.5** instala a dublagem no Elden Ring **1.17.1**
 > (Steam BuildID `25080141`). Os bancos de áudio foram reconstruídos sobre os
 > bancos originais dessa versão para preservar sons adicionados pelo jogo,
 > inclusive os cliques da interface que desapareciam nas versões 0.9.1 e 0.9.2.
+> A 0.9.5 mantém esse áudio corrigido e troca a distribuição por um pacote
+> plano, sem o ZIP de áudio aninhado.
 
 ## Download correto
 
 Na página [Releases](https://github.com/lorepamplona/ERPT-BR/releases), baixe
 somente:
 
-`ERPT-BR-v0.9.4-Windows.zip`
+`ERPT-BR-v0.9.5-Windows.zip`
 
 Esse é o pacote completo para o usuário: instalador em código-fonte,
 dependências verificadas e payload de áudio. Não baixe os ZIPs automáticos
@@ -23,7 +25,7 @@ do payload.
 ## Instalação no Windows
 
 1. Feche Elden Ring e Easy Anti-Cheat.
-2. Extraia **todo** o conteúdo de `ERPT-BR-v0.9.4-Windows.zip` para uma pasta
+2. Extraia **todo** o conteúdo de `ERPT-BR-v0.9.5-Windows.zip` para uma pasta
    normal.
 3. Dê dois cliques em `ERPT-BR.cmd`.
 4. Confirme a pasta `ELDEN RING\Game` detectada pela Steam ou selecione-a.
@@ -41,10 +43,11 @@ somente a permissão da pasta do jogo.
 
 ## Modo online
 
-A correção 0.9.4 foi testada em uma sessão real iniciada normalmente pela Steam,
-com Easy Anti-Cheat e conexão online ativos. O teste concluiu com sucesso e os
-sons de clique permaneceram funcionando. O patcher não desativa nem modifica o
-EAC, não injeta DLL e não muda a forma de iniciar o jogo.
+A correção de áudio mantida pela 0.9.5 foi testada em uma sessão real na 0.9.4,
+iniciada normalmente pela Steam, com Easy Anti-Cheat e conexão online ativos. O
+teste concluiu com sucesso e os sons de clique permaneceram funcionando. O
+patcher não desativa nem modifica o EAC, não injeta DLL e não muda a forma de
+iniciar o jogo.
 
 O método direto altera dados dentro dos BDTs, mas não regrava nem reassina os
 índices BHD. Assim, 8.973 recursos modificados não correspondem mais aos hashes
@@ -57,7 +60,17 @@ garantia de risco zero nem de compatibilidade com futuras atualizações do jogo
 do EAC ou das regras do serviço. Se a Steam atualizar o Elden Ring, restaure ou
 verifique os arquivos e aguarde a confirmação de suporte ao novo BuildID.
 
-## O que mudou na 0.9.4
+## O que mudou na 0.9.5
+
+- o áudio agora fica diretamente na pasta `patch_data` do pacote extraído;
+- não existe mais um ZIP grande de áudio dentro do ZIP de download;
+- a interface e o método de instalação permanecem os mesmos;
+- o pacote continua sendo um único download e uma única entrada,
+  `ERPT-BR.cmd`;
+- o conteúdo de áudio é validado pelo mesmo inventário e SHA-256 canônico da
+  árvore antes de qualquer gravação no jogo.
+
+## Correção de áudio mantida desde a 0.9.4
 
 - bancos Wwise reconstruídos usando a estrutura original do Elden Ring 1.17.1;
 - mídias e eventos novos do jogo preservados durante a incorporação das falas;
@@ -67,9 +80,9 @@ verifique os arquivos e aguarde a confirmação de suporte ao novo BuildID.
 - instalação de um clique sem executável próprio do projeto.
 
 O payload autenticado contém 9.241 arquivos: 8.969 WEMs e 272 aliases BNK,
-correspondentes a 136 bancos físicos reconstruídos. O ZIP interno possui
-588.468.447 bytes e SHA-256
-`430e9693a9b3313826e9f7c890cf592eb5b468d145bb405e8a4586002b877680`.
+correspondentes a 136 bancos físicos reconstruídos. A árvore descompactada
+possui 605.706.607 bytes e SHA-256 canônico
+`8544e551832c929eecad0cf9898204fd673bd4a37a0a6f37433865afbb3556cb`.
 
 ## Quem usou 0.9.1 ou 0.9.2
 
@@ -77,13 +90,13 @@ Essas versões substituíam bancos atuais por bancos antigos e podiam remover
 cliques do menu e sons de cutscenes. A versão 0.8.4 usa o mesmo payload antigo e
 não é um fallback seguro.
 
-Antes de instalar a 0.9.4:
+Antes de instalar a 0.9.5:
 
 1. Abra o pacote atual e use **Corrigir áudio (restaurar)** se existir um backup
    transacional válido.
 2. Se a restauração não estiver disponível ou falhar, use **Steam > Elden Ring >
    Propriedades > Arquivos instalados > Verificar integridade**.
-3. Confirme o áudio original e então instale a 0.9.4.
+3. Confirme o áudio original e então instale a 0.9.5.
 
 Consulte também a [migração do executável antigo](MIGRACAO.md) e o
 [relatório do incidente](docs/INCIDENTE-0.9.1.md).

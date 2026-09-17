@@ -14,12 +14,12 @@ instalação da dublagem.
 ## O que fazer se uma versão afetada foi instalada
 
 1. Feche Elden Ring e Easy Anti-Cheat.
-2. Baixe e extraia `ERPT-BR-v0.9.4-Windows.zip`.
+2. Baixe e extraia `ERPT-BR-v0.9.5-Windows.zip`.
 3. Abra `ERPT-BR.cmd` e clique em **Corrigir áudio (restaurar)**.
 4. Se o backup não estiver disponível ou a restauração falhar, use **Steam >
    Elden Ring > Propriedades > Arquivos instalados > Verificar integridade dos
    arquivos**.
-5. Confirme o áudio original e então use **Instalar dublagem** na versão 0.9.4.
+5. Confirme o áudio original e então use **Instalar dublagem** na versão 0.9.5.
 
 ## Diagnóstico técnico
 

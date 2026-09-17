@@ -1,8 +1,9 @@
-"""Secure discovery and extraction of ERPT-BR's audio payload.
+"""Secure discovery and validation of ERPT-BR's audio payload.
 
-Production releases bundle the data archive beside the source installer.  Its
-byte length and SHA-256 are pinned, so a file with the expected name cannot
-silently replace the reviewed audio data.  Explicit non-production specs may
+Production releases prefer a flat ``patch_data`` directory beside the source
+installer and authenticate its complete canonical tree.  The reviewed archive
+identity remains pinned as a secure legacy/cache input and as the authenticated
+build input used to assemble a flat release.  Explicit non-production specs may
 still opt into the HTTPS download path used by older releases and tests.
 """
 
@@ -1617,7 +1618,7 @@ def _ensure_patch_data_unlocked(
 
     if spec.url is None:
         raise PayloadValidationError(
-            f"O payload incluido '{spec.archive_name}' esta ausente ou nao passou "
+            "O payload incluido na pasta 'patch_data' esta ausente ou nao passou "
             "pela verificacao criptografica. Extraia novamente o ZIP oficial "
             "completo do ERPT-BR; nenhum download alternativo foi tentado."
         )
